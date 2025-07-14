@@ -1,0 +1,1385 @@
+{
+	"info": {
+		"_postman_id": "052df87b-a3b6-426d-92f6-181fad455a6d",
+		"name": "Matchmaking Function gRPC Plugin Server",
+		"description": "This `collection` requires an `environment` with the following variables.\n\n- `AB_BASE_URL`\n- `AB_NAMESPACE`\n- `AB_CLIENT_ID`\n- `AB_CLIENT_SECRET`\n- `EXTEND_APP_NAME`or `GRPC_SERVER_URL`\n    \n\nYou will need following permissions for the IAM Client.  \nFor AGS Private Cloud customers:\n\n- `NAMESPACE:{namespace}:MATCHMAKING:RULES [CREATE,READ,UPDATE,DELETE]`\n- `NAMESPACE:{namespace}:MATCHMAKING:FUNCTIONS [CREATE,READ,UPDATE,DELETE]`\n- `NAMESPACE:{namespace}:MATCHMAKING:POOL [CREATE,READ,UPDATE,DELETE]`\n- `NAMESPACE:{namespace}:MATCHMAKING:TICKET [CREATE,READ,UPDATE,DELETE]`\n- `ADMIN:NAMESPACE:{namespace}:INFORMATION:USER:\\\\* [CREATE,READ,UPDATE,DELETE]`\n- `ADMIN:NAMESPACE:{namespace}:SESSION:CONFIGURATION:\\\\* [CREATE,READ,UPDATE,DELETE]`\n    \n\nFor AGS Shared Cloud customers:\n\n- Matchmaking -> Rule Sets (Create, Read, Update, Delete)\n- Matchmaking -> Match Functions (Create, Read, Update, Delete)\n- Matchmaking -> Match Pools (Create, Read, Update, Delete)\n- Matchmaking -> Match Tickets (Create, Read, Update, Delete)\n- IAM -> Users (Create, Read, Update, Delete)\n- Session -> Configuration Template (Create, Read, Update, Delete)\n    \n\nMake sure you have deployed `Matchmaking Function gRPC Plugin Server` app. Get `EXTEND_APP_NAME` from extend app page in admin portal. For local deployment, use local url instead and set it as`GRPC_SERVER_URL`.\n\nPlease read [getting started with matchmaking customization](https://docs.accelbyte.io/gaming-services/services/extend/override/getting-started-with-matchmaking-customization/) for more information.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "25409821"
+	},
+	"item": [
+		{
+			"name": "10-client-login",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Store client access token in collection variable\", function () {\r",
+							"    var responseJson = pm.response.json();\r",
+							"    \r",
+							"    if (responseJson.access_token !== undefined) {\r",
+							"        pm.collectionVariables.set('CLIENT_ACCESS_TOKEN', responseJson.access_token)\r",
+							"    }\r",
+							"});\r",
+							""
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				},
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"console.log(\"Logging in client ...\")"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"request": {
+				"auth": {
+					"type": "basic",
+					"basic": [
+						{
+							"key": "password",
+							"value": "{{AB_CLIENT_SECRET}}",
+							"type": "string"
+						},
+						{
+							"key": "username",
+							"value": "{{AB_CLIENT_ID}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "urlencoded",
+					"urlencoded": [
+						{
+							"key": "grant_type",
+							"value": "client_credentials",
+							"type": "text"
+						}
+					]
+				},
+				"url": {
+					"raw": "{{AB_BASE_URL}}/iam/v3/oauth/token",
+					"host": [
+						"{{AB_BASE_URL}}"
+					],
+					"path": [
+						"iam",
+						"v3",
+						"oauth",
+						"token"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "20-create-session-template",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"console.log(pm.response.json());"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				},
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"console.log(\"Creating session template ...\");",
+							"",
+							"if(!pm.collectionVariables.get('DEMO_PREFIX')) {",
+							"    pm.collectionVariables.set('DEMO_PREFIX', 'mmv2_grpc_demo');",
+							"};"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": [
+						{
+							"key": "token",
+							"value": "{{CLIENT_ACCESS_TOKEN}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\r\n  \"clientVersion\": \"1.0.0\",\r\n  \"deployment\": null,\r\n  \"inactiveTimeout\": 60,\r\n  \"inviteTimeout\": 60,\r\n  \"joinability\": \"OPEN\",\r\n  \"maxPlayers\": 2,\r\n  \"minPlayers\": 2,\r\n  \"name\": \"{{DEMO_PREFIX}}_template\",\r\n  \"requestedRegions\": [\r\n    \"us-west-2\"\r\n  ],\r\n  \"textChat\": null,\r\n  \"type\": \"P2P\"\r\n}\r\n",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "{{AB_BASE_URL}}/session/v1/admin/namespaces/{{AB_NAMESPACE}}/configuration",
+					"host": [
+						"{{AB_BASE_URL}}"
+					],
+					"path": [
+						"session",
+						"v1",
+						"admin",
+						"namespaces",
+						"{{AB_NAMESPACE}}",
+						"configuration"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "30-create-ruleset",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							""
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				},
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"console.log(\"Creating rule sets ...\");"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": [
+						{
+							"key": "token",
+							"value": "{{CLIENT_ACCESS_TOKEN}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"enable_custom_match_function\": true,\n  \"data\": {\n    \"shipCountMin\": 2,\n    \"shipCountMax\": 2\n  },\n  \"name\": \"{{DEMO_PREFIX}}_ruleset\"\n}\n",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "{{AB_BASE_URL}}/match2/v1/namespaces/{{AB_NAMESPACE}}/rulesets",
+					"host": [
+						"{{AB_BASE_URL}}"
+					],
+					"path": [
+						"match2",
+						"v1",
+						"namespaces",
+						"{{AB_NAMESPACE}}",
+						"rulesets"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "40-delete-match-function",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							""
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				},
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"console.log(\"Deleting existing match function ...\");"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": [
+						{
+							"key": "token",
+							"value": "{{CLIENT_ACCESS_TOKEN}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "DELETE",
+				"header": [],
+				"url": {
+					"raw": "{{AB_BASE_URL}}/match2/v1/namespaces/{{AB_NAMESPACE}}/match-functions/{{DEMO_PREFIX}}_function",
+					"host": [
+						"{{AB_BASE_URL}}"
+					],
+					"path": [
+						"match2",
+						"v1",
+						"namespaces",
+						"{{AB_NAMESPACE}}",
+						"match-functions",
+						"{{DEMO_PREFIX}}_function"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "50-create-match-function-with-url",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							""
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				},
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"if (!pm.variables.get(\"GRPC_SERVER_URL\")) {",
+							"    console.log(\"Skipping this request because GRPC_SERVER_URL is not found.\");",
+							"    postman.setNextRequest('50-create-match-function-with-app-name'); ",
+							"} else {",
+							"    var extendAppUrl = pm.variables.get(\"GRPC_SERVER_URL\");",
+							"    console.log(`Registering match function with url: ${extendAppUrl}`);",
+							"};"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": [
+						{
+							"key": "token",
+							"value": "{{CLIENT_ACCESS_TOKEN}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"match_function\": \"{{DEMO_PREFIX}}_function\",\n  \"url\": \"{{GRPC_SERVER_URL}}\"\n}\n",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "{{AB_BASE_URL}}/match2/v1/namespaces/{{AB_NAMESPACE}}/match-functions",
+					"host": [
+						"{{AB_BASE_URL}}"
+					],
+					"path": [
+						"match2",
+						"v1",
+						"namespaces",
+						"{{AB_NAMESPACE}}",
+						"match-functions"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "50-create-match-function-with-app-name",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							""
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				},
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"if (!pm.variables.get(\"EXTEND_APP_NAME\")) {",
+							"    postman.setNextRequest('60-create-match-pool');",
+							"} else {",
+							"    var extendAppName = pm.variables.get(\"EXTEND_APP_NAME\");",
+							"    console.log(`Registering match function with app name: ${extendAppName}`);",
+							"};"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": [
+						{
+							"key": "token",
+							"value": "{{CLIENT_ACCESS_TOKEN}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"match_function\": \"{{DEMO_PREFIX}}_function\",\n  \"serviceAppName\": \"{{EXTEND_APP_NAME}}\"\n}\n",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "{{AB_BASE_URL}}/match2/v1/namespaces/{{AB_NAMESPACE}}/match-functions",
+					"host": [
+						"{{AB_BASE_URL}}"
+					],
+					"path": [
+						"match2",
+						"v1",
+						"namespaces",
+						"{{AB_NAMESPACE}}",
+						"match-functions"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "60-create-match-pool",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							""
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				},
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"console.log(\"Creating match pool ...\");"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": [
+						{
+							"key": "token",
+							"value": "{{CLIENT_ACCESS_TOKEN}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"backfill_ticket_expiration_seconds\": 600,\n  \"match_function\": \"{{DEMO_PREFIX}}_function\",\n  \"name\": \"{{DEMO_PREFIX}}_pool\",\n  \"rule_set\": \"{{DEMO_PREFIX}}_ruleset\",\n  \"session_template\": \"{{DEMO_PREFIX}}_template\",\n  \"ticket_expiration_seconds\": 600\n}\n",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "{{AB_BASE_URL}}/match2/v1/namespaces/{{AB_NAMESPACE}}/match-pools",
+					"host": [
+						"{{AB_BASE_URL}}"
+					],
+					"path": [
+						"match2",
+						"v1",
+						"namespaces",
+						"{{AB_NAMESPACE}}",
+						"match-pools"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "70 client-create-test-users",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Store test user id, email, and password in collection variable\", function () {\r",
+							"    var responseJson = pm.response.json();\r",
+							"    \r",
+							"    // Player 1\r",
+							"    if (responseJson.data[0].userId !== undefined) {\r",
+							"        pm.collectionVariables.set('TEST_USER_ID_PLAYER_1', responseJson.data[0].userId)\r",
+							"    }\r",
+							"    if (responseJson.data[0].emailAddress !== undefined) {\r",
+							"        pm.collectionVariables.set('TEST_USER_EMAIL_PLAYER_1', responseJson.data[0].emailAddress)\r",
+							"    }\r",
+							"    if (responseJson.data[0].password !== undefined) {\r",
+							"        pm.collectionVariables.set('TEST_USER_PASSWORD_PLAYER_1', responseJson.data[0].password)\r",
+							"    }\r",
+							"\r",
+							"    // Player 2\r",
+							"    if (responseJson.data[1].userId !== undefined) {\r",
+							"        pm.collectionVariables.set('TEST_USER_ID_PLAYER_2', responseJson.data[1].userId)\r",
+							"    }\r",
+							"    if (responseJson.data[1].emailAddress !== undefined) {\r",
+							"        pm.collectionVariables.set('TEST_USER_EMAIL_PLAYER_2', responseJson.data[1].emailAddress)\r",
+							"    }\r",
+							"    if (responseJson.data[1].password !== undefined) {\r",
+							"        pm.collectionVariables.set('TEST_USER_PASSWORD_PLAYER_2', responseJson.data[1].password)\r",
+							"    }\r",
+							"\r",
+							"    // Player 3\r",
+							"    if (responseJson.data[2].userId !== undefined) {\r",
+							"        pm.collectionVariables.set('TEST_USER_ID_PLAYER_3', responseJson.data[2].userId)\r",
+							"    }\r",
+							"    if (responseJson.data[2].emailAddress !== undefined) {\r",
+							"        pm.collectionVariables.set('TEST_USER_EMAIL_PLAYER_3', responseJson.data[2].emailAddress)\r",
+							"    }\r",
+							"    if (responseJson.data[2].password !== undefined) {\r",
+							"        pm.collectionVariables.set('TEST_USER_PASSWORD_PLAYER_3', responseJson.data[2].password)\r",
+							"    }\r",
+							"});"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				},
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"console.log(\"Creating 3 test users as players ...\");"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": [
+						{
+							"key": "token",
+							"value": "{{CLIENT_ACCESS_TOKEN}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\r\n  \"count\": 3,\r\n  \"userInfo\": {\r\n    \"country\": \"US\"\r\n  }\r\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "{{AB_BASE_URL}}/iam/v4/admin/namespaces/{{AB_NAMESPACE}}/test_users",
+					"host": [
+						"{{AB_BASE_URL}}"
+					],
+					"path": [
+						"iam",
+						"v4",
+						"admin",
+						"namespaces",
+						"{{AB_NAMESPACE}}",
+						"test_users"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "80-test-user-login-player-1",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Store test user player 1 access token in collection variable\", function () {\r",
+							"    var responseJson = pm.response.json();\r",
+							"    \r",
+							"    if (responseJson.access_token !== undefined) {\r",
+							"        pm.collectionVariables.set('TEST_USER_ACCESS_TOKEN_PLAYER_1', responseJson.access_token)\r",
+							"    }\r",
+							"});\r",
+							""
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				},
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"console.log(\"Logging in Player 1 ...\");"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"protocolProfileBehavior": {
+				"followRedirects": false
+			},
+			"request": {
+				"auth": {
+					"type": "basic",
+					"basic": [
+						{
+							"key": "password",
+							"value": "{{AB_CLIENT_SECRET}}",
+							"type": "string"
+						},
+						{
+							"key": "username",
+							"value": "{{AB_CLIENT_ID}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "urlencoded",
+					"urlencoded": [
+						{
+							"key": "grant_type",
+							"value": "password",
+							"type": "text"
+						},
+						{
+							"key": "username",
+							"value": "{{TEST_USER_EMAIL_PLAYER_1}}",
+							"type": "text"
+						},
+						{
+							"key": "password",
+							"value": "{{TEST_USER_PASSWORD_PLAYER_1}}",
+							"type": "text"
+						}
+					]
+				},
+				"url": {
+					"raw": "{{AB_BASE_URL}}/iam/v3/oauth/token",
+					"host": [
+						"{{AB_BASE_URL}}"
+					],
+					"path": [
+						"iam",
+						"v3",
+						"oauth",
+						"token"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "80-test-user-login-player-2",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Store test user player 2 access token in collection variable\", function () {\r",
+							"    var responseJson = pm.response.json();\r",
+							"    \r",
+							"    if (responseJson.access_token !== undefined) {\r",
+							"        pm.collectionVariables.set('TEST_USER_ACCESS_TOKEN_PLAYER_2', responseJson.access_token)\r",
+							"    }\r",
+							"});\r",
+							""
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				},
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"console.log(\"Logging in Player 2 ...\");"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"protocolProfileBehavior": {
+				"followRedirects": false
+			},
+			"request": {
+				"auth": {
+					"type": "basic",
+					"basic": [
+						{
+							"key": "password",
+							"value": "{{AB_CLIENT_SECRET}}",
+							"type": "string"
+						},
+						{
+							"key": "username",
+							"value": "{{AB_CLIENT_ID}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "urlencoded",
+					"urlencoded": [
+						{
+							"key": "grant_type",
+							"value": "password",
+							"type": "text"
+						},
+						{
+							"key": "username",
+							"value": "{{TEST_USER_EMAIL_PLAYER_2}}",
+							"type": "text"
+						},
+						{
+							"key": "password",
+							"value": "{{TEST_USER_PASSWORD_PLAYER_2}}",
+							"type": "text"
+						}
+					]
+				},
+				"url": {
+					"raw": "{{AB_BASE_URL}}/iam/v3/oauth/token",
+					"host": [
+						"{{AB_BASE_URL}}"
+					],
+					"path": [
+						"iam",
+						"v3",
+						"oauth",
+						"token"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "80-test-user-login-player-3",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Store test user player 3 access token in collection variable\", function () {\r",
+							"    var responseJson = pm.response.json();\r",
+							"    \r",
+							"    if (responseJson.access_token !== undefined) {\r",
+							"        pm.collectionVariables.set('TEST_USER_ACCESS_TOKEN_PLAYER_3', responseJson.access_token)\r",
+							"    }\r",
+							"});\r",
+							""
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				},
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"console.log(\"Logging in Player 2 ...\");"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"protocolProfileBehavior": {
+				"followRedirects": false
+			},
+			"request": {
+				"auth": {
+					"type": "basic",
+					"basic": [
+						{
+							"key": "password",
+							"value": "{{AB_CLIENT_SECRET}}",
+							"type": "string"
+						},
+						{
+							"key": "username",
+							"value": "{{AB_CLIENT_ID}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "urlencoded",
+					"urlencoded": [
+						{
+							"key": "grant_type",
+							"value": "password",
+							"type": "text"
+						},
+						{
+							"key": "username",
+							"value": "{{TEST_USER_EMAIL_PLAYER_3}}",
+							"type": "text"
+						},
+						{
+							"key": "password",
+							"value": "{{TEST_USER_PASSWORD_PLAYER_3}}",
+							"type": "text"
+						}
+					]
+				},
+				"url": {
+					"raw": "{{AB_BASE_URL}}/iam/v3/oauth/token",
+					"host": [
+						"{{AB_BASE_URL}}"
+					],
+					"path": [
+						"iam",
+						"v3",
+						"oauth",
+						"token"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "90-create-match-ticket-player-1",
+			"event": [
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"console.log(\"Creating match ticket for Player 1 ...\");"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				},
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Match ticket Player 1\", function () {",
+							"    var responseJson = pm.response.json();",
+							"    ",
+							"    if (responseJson.matchTicketID !== undefined) {",
+							"        console.log(`Player 1 userId:${pm.variables.get('TEST_USER_ID_PLAYER_1')} match ticket: ${responseJson.matchTicketID}`);",
+							"    }",
+							"});"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": [
+						{
+							"key": "token",
+							"value": "{{TEST_USER_ACCESS_TOKEN_PLAYER_1}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"attributes\": null,\n  \"latencies\": null,\n  \"matchPool\": \"{{DEMO_PREFIX}}_pool\",\n  \"sessionID\": \"\"\n}\n",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "{{AB_BASE_URL}}/match2/v1/namespaces/{{AB_NAMESPACE}}/match-tickets",
+					"host": [
+						"{{AB_BASE_URL}}"
+					],
+					"path": [
+						"match2",
+						"v1",
+						"namespaces",
+						"{{AB_NAMESPACE}}",
+						"match-tickets"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "90-create-match-ticket-player-2",
+			"event": [
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"console.log(\"Creating match ticket for Player 2 ...\");"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				},
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Match ticket Player 2\", function () {",
+							"    var responseJson = pm.response.json();",
+							"    ",
+							"    if (responseJson.matchTicketID !== undefined) {",
+							"        console.log(`Player 2 userId:${pm.variables.get('TEST_USER_ID_PLAYER_2')} match ticket: ${responseJson.matchTicketID}`);",
+							"    }",
+							"});"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": [
+						{
+							"key": "token",
+							"value": "{{TEST_USER_ACCESS_TOKEN_PLAYER_2}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"attributes\": null,\n  \"latencies\": null,\n  \"matchPool\": \"{{DEMO_PREFIX}}_pool\",\n  \"sessionID\": \"\"\n}\n",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "{{AB_BASE_URL}}/match2/v1/namespaces/{{AB_NAMESPACE}}/match-tickets",
+					"host": [
+						"{{AB_BASE_URL}}"
+					],
+					"path": [
+						"match2",
+						"v1",
+						"namespaces",
+						"{{AB_NAMESPACE}}",
+						"match-tickets"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "90-create-match-ticket-player-3",
+			"event": [
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"console.log(\"Creating match ticket for Player 3 ...\");"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				},
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Match ticket Player 3\", function () {",
+							"    var responseJson = pm.response.json();",
+							"    ",
+							"    if (responseJson.matchTicketID !== undefined) {",
+							"        console.log(`Player 3 userId:${pm.variables.get('TEST_USER_ID_PLAYER_3')} match ticket: ${responseJson.matchTicketID}`);",
+							"    }",
+							"});"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": [
+						{
+							"key": "token",
+							"value": "{{TEST_USER_ACCESS_TOKEN_PLAYER_3}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"attributes\": null,\n  \"latencies\": null,\n  \"matchPool\": \"{{DEMO_PREFIX}}_pool\",\n  \"sessionID\": \"\"\n}\n",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "{{AB_BASE_URL}}/match2/v1/namespaces/{{AB_NAMESPACE}}/match-tickets",
+					"host": [
+						"{{AB_BASE_URL}}"
+					],
+					"path": [
+						"match2",
+						"v1",
+						"namespaces",
+						"{{AB_NAMESPACE}}",
+						"match-tickets"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "11-client-delete-test-player-1",
+			"event": [
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"console.log(\"Cleaning up ...\");"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": [
+						{
+							"key": "token",
+							"value": "{{CLIENT_ACCESS_TOKEN}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "DELETE",
+				"header": [],
+				"url": {
+					"raw": "{{AB_BASE_URL}}/iam/v3/admin/namespaces/{{AB_NAMESPACE}}/users/{{TEST_USER_ID_PLAYER_1}}/information",
+					"host": [
+						"{{AB_BASE_URL}}"
+					],
+					"path": [
+						"iam",
+						"v3",
+						"admin",
+						"namespaces",
+						"{{AB_NAMESPACE}}",
+						"users",
+						"{{TEST_USER_ID_PLAYER_1}}",
+						"information"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "11-client-delete-test-player-2",
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": [
+						{
+							"key": "token",
+							"value": "{{CLIENT_ACCESS_TOKEN}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "DELETE",
+				"header": [],
+				"url": {
+					"raw": "{{AB_BASE_URL}}/iam/v3/admin/namespaces/{{AB_NAMESPACE}}/users/{{TEST_USER_ID_PLAYER_2}}/information",
+					"host": [
+						"{{AB_BASE_URL}}"
+					],
+					"path": [
+						"iam",
+						"v3",
+						"admin",
+						"namespaces",
+						"{{AB_NAMESPACE}}",
+						"users",
+						"{{TEST_USER_ID_PLAYER_2}}",
+						"information"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "11-client-delete-test-player-3",
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": [
+						{
+							"key": "token",
+							"value": "{{CLIENT_ACCESS_TOKEN}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "DELETE",
+				"header": [],
+				"url": {
+					"raw": "{{AB_BASE_URL}}/iam/v3/admin/namespaces/{{AB_NAMESPACE}}/users/{{TEST_USER_ID_PLAYER_3}}/information",
+					"host": [
+						"{{AB_BASE_URL}}"
+					],
+					"path": [
+						"iam",
+						"v3",
+						"admin",
+						"namespaces",
+						"{{AB_NAMESPACE}}",
+						"users",
+						"{{TEST_USER_ID_PLAYER_3}}",
+						"information"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "12-delete-match-pool",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							""
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				},
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							""
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": [
+						{
+							"key": "token",
+							"value": "{{CLIENT_ACCESS_TOKEN}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "DELETE",
+				"header": [],
+				"url": {
+					"raw": "{{AB_BASE_URL}}/match2/v1/namespaces/{{AB_NAMESPACE}}/match-pools/{{DEMO_PREFIX}}_pool",
+					"host": [
+						"{{AB_BASE_URL}}"
+					],
+					"path": [
+						"match2",
+						"v1",
+						"namespaces",
+						"{{AB_NAMESPACE}}",
+						"match-pools",
+						"{{DEMO_PREFIX}}_pool"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "13-delete-ruleset",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							""
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				},
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							""
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": [
+						{
+							"key": "token",
+							"value": "{{CLIENT_ACCESS_TOKEN}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "DELETE",
+				"header": [],
+				"url": {
+					"raw": "{{AB_BASE_URL}}/match2/v1/namespaces/{{AB_NAMESPACE}}/rulesets/{{DEMO_PREFIX}}_ruleset",
+					"host": [
+						"{{AB_BASE_URL}}"
+					],
+					"path": [
+						"match2",
+						"v1",
+						"namespaces",
+						"{{AB_NAMESPACE}}",
+						"rulesets",
+						"{{DEMO_PREFIX}}_ruleset"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "14-delete-session-template",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							""
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				},
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							""
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": [
+						{
+							"key": "token",
+							"value": "{{CLIENT_ACCESS_TOKEN}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "DELETE",
+				"header": [],
+				"url": {
+					"raw": "{{AB_BASE_URL}}/session/v1/admin/namespaces/{{AB_NAMESPACE}}/configurations/{{DEMO_PREFIX}}_template",
+					"host": [
+						"{{AB_BASE_URL}}"
+					],
+					"path": [
+						"session",
+						"v1",
+						"admin",
+						"namespaces",
+						"{{AB_NAMESPACE}}",
+						"configurations",
+						"{{DEMO_PREFIX}}_template"
+					]
+				}
+			},
+			"response": []
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"packages": {},
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"packages": {},
+				"exec": [
+					""
+				]
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "CLIENT_ACCESS_TOKEN",
+			"value": ""
+		},
+		{
+			"key": "DEMO_PREFIX",
+			"value": ""
+		},
+		{
+			"key": "TEST_USER_ID_PLAYER_1",
+			"value": ""
+		},
+		{
+			"key": "TEST_USER_EMAIL_PLAYER_1",
+			"value": ""
+		},
+		{
+			"key": "TEST_USER_PASSWORD_PLAYER_1",
+			"value": ""
+		},
+		{
+			"key": "TEST_USER_ID_PLAYER_2",
+			"value": ""
+		},
+		{
+			"key": "TEST_USER_EMAIL_PLAYER_2",
+			"value": ""
+		},
+		{
+			"key": "TEST_USER_PASSWORD_PLAYER_2",
+			"value": ""
+		},
+		{
+			"key": "TEST_USER_ACCESS_TOKEN_PLAYER_1",
+			"value": ""
+		},
+		{
+			"key": "TEST_USER_ACCESS_TOKEN_PLAYER_2",
+			"value": ""
+		},
+		{
+			"key": "TEST_USER_ID_PLAYER_3",
+			"value": ""
+		},
+		{
+			"key": "TEST_USER_EMAIL_PLAYER_3",
+			"value": ""
+		},
+		{
+			"key": "TEST_USER_PASSWORD_PLAYER_3",
+			"value": ""
+		},
+		{
+			"key": "TEST_USER_ACCESS_TOKEN_PLAYER_3",
+			"value": ""
+		}
+	]
+}

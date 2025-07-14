@@ -1,0 +1,169 @@
+// Copyright (c) 2025 AccelByte Inc. All Rights Reserved.
+// This is licensed software from AccelByte Inc, for limitations
+// and restrictions contact your company contract manager.
+
+syntax = "proto3";
+
+package accelbyte.matchmaking.matchfunction;
+// Version v1.0.0
+
+option csharp_namespace = "AccelByte.MatchmakingV2.MatchFunction";
+option go_package = "accelbyte.net/matchmakingv2/matchfunction";
+option java_multiple_files = true;
+option java_package = "net.accelbyte.matchmakingv2.matchfunction";
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+service MatchFunction {
+  rpc GetStatCodes(GetStatCodesRequest) returns (StatCodesResponse);
+  rpc ValidateTicket(ValidateTicketRequest) returns (ValidateTicketResponse);
+  rpc EnrichTicket(EnrichTicketRequest) returns (EnrichTicketResponse);
+  rpc MakeMatches(stream MakeMatchesRequest) returns (stream MatchResponse);
+  rpc BackfillMatches(stream BackfillMakeMatchesRequest) returns (stream BackfillResponse);
+}
+
+// GetStatCodes
+message GetStatCodesRequest {
+  Rules rules = 1;
+}
+
+message StatCodesResponse {
+  repeated string codes = 1;
+}
+
+// ValidateTicket
+message ValidateTicketRequest {
+  Ticket ticket = 1;
+  Rules rules = 2;
+}
+message ValidateTicketResponse {
+  bool valid_ticket = 1;
+}
+
+// EnrichTicket
+message EnrichTicketRequest {
+  Ticket ticket = 1;
+  Rules rules =2;
+}
+message EnrichTicketResponse {
+  Ticket ticket = 1;
+}
+
+// Make Matches
+message MakeMatchesRequest {
+  message MakeMatchesParameters{
+    Scope scope = 1;
+    Rules rules = 2; 
+  }
+  oneof request_type {
+    MakeMatchesParameters parameters = 1;
+    Ticket ticket = 2;
+  }
+}
+message MatchResponse {
+  Match match = 1;
+}
+
+message Scope {
+  string ab_trace_id = 1;
+}
+
+message Rules {
+  string json = 1;
+}
+
+message Party {
+  string party_id = 1;
+  repeated string user_ids = 2;
+}
+
+message Match {
+  message Team {
+    repeated string user_ids = 1;
+    repeated Party parties = 2;
+  }
+  repeated Ticket tickets = 1;
+  repeated Team teams = 2;
+  repeated string region_preferences = 3;
+  google.protobuf.Struct match_attributes = 4;
+  bool backfill = 5;
+  string server_name = 6;
+  string client_version = 7;
+  ServerPool server_pool = 8;
+}
+
+message ServerPool {
+  string server_provider = 1;
+  string deployment = 2;
+  repeated string claim_keys = 3;
+}
+
+message Ticket {
+  message PlayerData {
+    string player_id = 1;
+    google.protobuf.Struct attributes = 2;
+  }
+  string ticket_id = 1;
+  string match_pool = 2;
+  google.protobuf.Timestamp   CreatedAt = 3;
+  repeated PlayerData players = 4;
+  google.protobuf.Struct ticket_attributes = 5;
+  map<string, int64> latencies = 6;
+  string party_session_id = 7;
+  string namespace = 8;
+  repeated string excluded_sessions = 9;
+}
+
+// Backfill
+message BackfillProposal {
+  message Team {
+    repeated string user_ids = 1;
+    repeated Party parties = 2;
+  }
+  string backfill_ticket_id = 1;
+  google.protobuf.Timestamp   CreatedAt = 2;
+  repeated Ticket added_tickets = 3;
+  repeated Team proposed_teams = 4;
+  string proposal_id = 5;
+  string match_pool = 6;
+  string match_session_id = 7;
+}
+
+// Backfill Make Matches
+message BackfillMakeMatchesRequest {
+  message MakeMatchesParameters{
+    Scope scope = 1;
+    Rules rules = 2;
+  }
+  oneof request_type {
+    MakeMatchesParameters parameters = 1;
+    BackfillTicket backfill_ticket = 2;
+    Ticket ticket = 3;
+  }
+}
+
+message BackfillResponse {
+  BackfillProposal backfill_proposal = 1;
+}
+
+message BackfillTicket {
+  message Team {
+    repeated string user_ids = 1;
+    repeated Party parties = 2;
+  }
+  message PartialMatch {
+    repeated Ticket tickets = 1;
+    repeated Team teams = 2;
+    repeated string region_preferences = 3;
+    google.protobuf.Struct match_attributes = 4;
+    bool backfill = 5;
+    string server_name = 6;
+    string client_version = 7;
+  }
+  string ticket_id = 1;
+  string match_pool = 2;
+  google.protobuf.Timestamp   CreatedAt = 3;
+  PartialMatch partial_match = 4;
+  string match_session_id = 5;
+}

@@ -1,0 +1,13 @@
+# Go cache
+.cache/
+
+# Environment files
+.env
+
+# Go build output
+extend-core-matchmaker
+/vendor/
+/coverage.txt
+/coverage.xml
+/profile.out
+/test.xml

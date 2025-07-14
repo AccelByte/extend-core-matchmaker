@@ -1,0 +1,3158 @@
+// Copyright (c) 2025 AccelByte Inc. All Rights Reserved.
+// This is licensed software from AccelByte Inc, for limitations
+// and restrictions contact your company contract manager.
+
+package defaultmatchmaker
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/AccelByte/extend-core-matchmaker/pkg/config"
+	"github.com/AccelByte/extend-core-matchmaker/pkg/constants"
+	"github.com/AccelByte/extend-core-matchmaker/pkg/envelope"
+	"github.com/AccelByte/extend-core-matchmaker/pkg/models"
+	"github.com/AccelByte/extend-core-matchmaker/pkg/rebalance"
+	"github.com/AccelByte/extend-core-matchmaker/pkg/rebalance/rebalance_v1"
+	"github.com/AccelByte/extend-core-matchmaker/pkg/utils"
+	"github.com/davecgh/go-spew/spew"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gopkg.in/typ.v4/slices"
+)
+
+func generateSession(channelName string, allianceCount int, playerCounts []int) *models.MatchmakingResult {
+	alliances := make([]models.MatchingAlly, 0, allianceCount)
+	t := time.Now()
+	for i := 0; i < allianceCount; i++ {
+		players := playerCounts[i]
+		members := make([]models.PartyMember, 0, players)
+		for j := 0; j < players; j++ {
+			members = append(members, models.PartyMember{
+				UserID:          utils.GenerateUUID(),
+				ExtraAttributes: nil,
+			})
+		}
+
+		alliances = append(alliances, models.MatchingAlly{
+			MatchingParties: []models.MatchingParty{
+				{
+					PartyID:         generateUlid(t),
+					PartyAttributes: nil,
+					PartyMembers:    members,
+				},
+			},
+		})
+	}
+
+	return &models.MatchmakingResult{
+		MatchID:         utils.GenerateUUID(),
+		MatchSessionID:  utils.GenerateUUID(),
+		Channel:         channelName,
+		Namespace:       "test",
+		GameMode:        "test",
+		Joinable:        true,
+		MatchingAllies:  alliances,
+		PartyAttributes: map[string]interface{}{},
+	}
+}
+
+func containsTicket(session *models.MatchmakingResult, ticket *models.MatchmakingRequest) bool {
+	for _, ally := range session.MatchingAllies {
+		for _, party := range ally.MatchingParties {
+			if party.PartyID != ticket.PartyID {
+				continue
+			}
+
+			memberFound := 0
+			for _, member := range party.PartyMembers {
+				found := false
+				for _, partyMember := range ticket.PartyMembers {
+					if member.UserID == partyMember.UserID {
+						found = true
+						break
+					}
+				}
+
+				if found {
+					memberFound++
+				}
+			}
+
+			if memberFound != len(ticket.PartyMembers) {
+				continue
+			}
+
+			return true
+		}
+	}
+
+	return false
+}
+
+func TestMatchSession_AddToAlly_Success(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_AddToAlly_Success", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	tickets := generateRequest("2v2", 1, 1)
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, matchedSessions, session, "matched session should contain the session")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.True(t, containsTicket(session, &tickets[0]), "matched session should contain the ticket")
+}
+
+// ASP-7014
+// when the rebalance is enabled, ruleset sets to min 1 and max 2 alliances, and the backfillable session contains only 1 ally, rebalance doesn't kick in.
+// since initially in backfill rebalance, it skips out rebalance if alliance only 1. removing this checking of alliance enables the alliances to get rebalanced.
+func TestMatchSession_AddToAlly_Success_WithMMR_RebalanceEnable(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_AddToAlly_Success_WithMMR_RebalanceEnable", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 1, []int{1})
+	session.PartyAttributes[models.AttributeMemberAttr] = map[string]interface{}{"mmr": float64(1)}
+	tickets := generateRequestWithMMR("2v2", 1, 1, 7)
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       1,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 5,
+		},
+		MatchingRule: []models.MatchingRule{{
+			Attribute: "mmr",
+			Criteria:  "distance",
+			Reference: 100,
+		}},
+		RebalanceEnable: models.TRUE(),
+	}
+
+	updatedSessions, _, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.Len(t, updatedSessions[0].MatchingAllies, 2)
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+}
+
+func TestMatchSession_AddToAlly_Success_WithoutMMR_RebalanceEnable(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_AddToAlly_Success_WithoutMMR_RebalanceEnable", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.PartyAttributes[models.AttributeMemberAttr] = map[string]interface{}{}
+	tickets := generateRequest("2v2", 1, 1)
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       1,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 5,
+		},
+		RebalanceEnable: models.TRUE(),
+	}
+
+	updatedSessions, _, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.Len(t, updatedSessions[0].MatchingAllies, 2)
+	assert.Len(t, updatedSessions[0].MatchingAllies[1].MatchingParties, 2)
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+}
+
+func TestMatchSession_AddToAlly_TooManyPlayers_Failed(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_AddToAlly_TooManyPlayers_Failed", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	tickets := generateRequest("2v2", 1, 2)
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	updatedSessions, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.NotContains(t, updatedSessions, session, "updated session should not contain the session")
+	assert.NotContains(t, matchedSessions, session, "matched session should not contain the session")
+	assert.NotContains(t, matchedTickets, tickets[0], "matched tickets should not contain the ticket")
+	assert.False(t, containsTicket(session, &tickets[0]), "matched session should not contain the ticket")
+}
+
+func TestMatchSession_CreateNewAlly_Success(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_CreateNewAlly_Success", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("royale", 2, []int{1, 1})
+	tickets := generateRequest("royale", 1, 1)
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       3,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 1,
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, matchedSessions, session, "matched session should contain the session")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.True(t, containsTicket(session, &tickets[0]), "matched session should contain the ticket")
+	assert.Equal(t, 3, len(session.MatchingAllies), "session should have added alliance")
+}
+
+func TestMatchSession_Rebalance_Enable(t *testing.T) {
+	t.Parallel()
+	t.Skip()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_Rebalance_Enable", "")
+	defer scope.Finish()
+	matchmaker := NewMatchmaker()
+	session := generateSession("4v4", 2, []int{2, 2})
+	tickets := generateRequest("4v4", 2, 1)
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+	ruleset := models.RuleSet{
+		RebalanceEnable: models.TRUE(),
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 2,
+			PlayerMaxNumber: 4,
+		},
+	}
+	updatedSessions, _, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, updatedSessions, session, "matched session should contain the session")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.Contains(t, matchedTickets, tickets[1], "matched tickets should contain the ticket")
+	assert.Equal(t, 0, rebalance_v1.CountMemberDiff(session.MatchingAllies), "member diff should be 0")
+}
+
+func TestMatchSession_Rebalance_Disable(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_Rebalance_Disable", "")
+	defer scope.Finish()
+	matchmaker := NewMatchmaker()
+	session := generateSession("4v4", 2, []int{2, 2})
+	tickets := generateRequest("4v4", 2, 1)
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+	ruleset := models.RuleSet{
+		RebalanceEnable: models.FALSE(),
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 2,
+			PlayerMaxNumber: 4,
+		},
+	}
+	updatedSessions, _, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, updatedSessions, session, "matched session should contain the session")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.Contains(t, matchedTickets, tickets[1], "matched tickets should contain the ticket")
+	assert.Equal(t, 2, rebalance_v1.CountMemberDiff(session.MatchingAllies), "member diff should be 2")
+}
+
+func getPartyIDs(ally models.MatchingAlly) (partyIDs []string) {
+	for _, party := range ally.MatchingParties {
+		partyIDs = append(partyIDs, party.PartyID)
+	}
+	return partyIDs
+}
+
+func TestMatchSession_Rebalance_By_Member_Count(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_Rebalance_By_Member_Count", "")
+	defer scope.Finish()
+	matchmaker := NewMatchmaker()
+	session := &models.MatchmakingResult{
+		MatchingAllies: []models.MatchingAlly{
+			{
+				MatchingParties: []models.MatchingParty{
+					{
+						PartyID:      "party1",
+						PartyMembers: []models.PartyMember{{UserID: utils.GenerateUUID()}},
+					},
+					{
+						PartyID:      "party2",
+						PartyMembers: []models.PartyMember{{UserID: utils.GenerateUUID()}},
+					},
+					{
+						PartyID:      "party3",
+						PartyMembers: []models.PartyMember{{UserID: utils.GenerateUUID()}},
+					},
+				},
+			},
+			{
+				MatchingParties: []models.MatchingParty{
+					{
+						PartyID:      "party4",
+						PartyMembers: []models.PartyMember{{UserID: utils.GenerateUUID()}},
+					},
+				},
+			},
+		},
+		MatchID:         utils.GenerateUUID(),
+		Channel:         "4v4",
+		Namespace:       "test",
+		GameMode:        "test",
+		Joinable:        true,
+		PartyAttributes: map[string]interface{}{},
+	}
+	tickets := generateRequest("4v4", 1, 1)
+	tickets[0].PartyID = "party5"
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+	ruleset := models.RuleSet{
+		RebalanceEnable: models.TRUE(),
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 2,
+			PlayerMaxNumber: 4,
+		},
+	}
+	updatedSessions, _, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, updatedSessions, session, "matched session should contain the session")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.ElementsMatch(t, getPartyIDs(session.MatchingAllies[0]), []string{"party1", "party2", "party3"}, "matched session should contain the ticket")
+	assert.ElementsMatch(t, getPartyIDs(session.MatchingAllies[1]), []string{"party4", "party5"}, "matched session should contain the ticket")
+	assert.Equal(t, 3, session.MatchingAllies[0].CountPlayer(), "player count for ally 1 should be 3")
+	assert.Equal(t, 2, session.MatchingAllies[1].CountPlayer(), "player count for ally 2 should be 1")
+}
+
+func TestMatchSession_Rebalance_By_First_Attribute(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_Rebalance_By_First_Attribute", "")
+	defer scope.Finish()
+	matchmaker := NewMatchmaker()
+	session := &models.MatchmakingResult{
+		MatchingAllies: []models.MatchingAlly{
+			{
+				MatchingParties: []models.MatchingParty{
+					{
+						PartyID: "party1",
+						PartyMembers: []models.PartyMember{{
+							UserID:          utils.GenerateUUID(),
+							ExtraAttributes: map[string]interface{}{"mmr": 5},
+						}},
+					},
+					{
+						PartyID: "party2",
+						PartyMembers: []models.PartyMember{{
+							UserID:          utils.GenerateUUID(),
+							ExtraAttributes: map[string]interface{}{"mmr": 5},
+						}},
+					},
+				},
+			},
+			{
+				MatchingParties: []models.MatchingParty{
+					{
+						PartyID: "party3",
+						PartyMembers: []models.PartyMember{{
+							UserID:          utils.GenerateUUID(),
+							ExtraAttributes: map[string]interface{}{"mmr": 3},
+						}},
+					},
+				},
+			},
+		},
+		MatchID:         utils.GenerateUUID(),
+		Channel:         "4v4",
+		Namespace:       "test",
+		GameMode:        "test",
+		Joinable:        true,
+		PartyAttributes: map[string]interface{}{},
+	}
+	tickets := generateRequest("4v4", 2, 1)
+
+	tickets[0].PartyID = "party4"
+	tickets[0].PartyAttributes[models.AttributeMemberAttr] = map[string]interface{}{"mmr": 5}
+	tickets[0].PartyMembers[0].ExtraAttributes = map[string]interface{}{"mmr": 5}
+
+	tickets[1].PartyID = "party5"
+	tickets[1].PartyAttributes[models.AttributeMemberAttr] = map[string]interface{}{"mmr": 7}
+	tickets[1].PartyMembers[0].ExtraAttributes = map[string]interface{}{"mmr": 7}
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+	channel := models.Channel{
+		Ruleset: models.RuleSet{
+			RebalanceEnable: models.TRUE(),
+			AllianceRule: models.AllianceRule{
+				MinNumber:       2,
+				MaxNumber:       2,
+				PlayerMinNumber: 2,
+				PlayerMaxNumber: 4,
+			},
+			MatchingRule: []models.MatchingRule{
+				{
+					Attribute: "mmr",
+					Criteria:  constants.DistanceCriteria,
+					Reference: 10,
+				},
+			},
+		},
+	}
+	updatedSessions, _, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, channel)
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, updatedSessions, session, "matched session should contain the session")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.Equal(t, float64(0), rebalance.CountDistance(session.MatchingAllies, []string{"mmr"}, nil), "distance should be 0")
+	assert.Equal(t, 1, rebalance_v1.CountMemberDiff(session.MatchingAllies), "member diff should be 1")
+}
+
+func TestMatchSession_Rebalance_DifferentMinMax(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_Rebalance_DifferentMinMax", "")
+	defer scope.Finish()
+
+	var (
+		namespace   = utils.GenerateUUID()
+		gameMode    = utils.GenerateUUID()
+		channelSlug = namespace + ":" + gameMode
+	)
+
+	matchmaker := NewMatchmaker()
+	session := &models.MatchmakingResult{
+		MatchingAllies: []models.MatchingAlly{
+			{
+				MatchingParties: []models.MatchingParty{
+					{
+						PartyID: "party1",
+						PartyMembers: []models.PartyMember{{
+							UserID: utils.GenerateUUID(),
+						}},
+					},
+				},
+			},
+		},
+		MatchID:         utils.GenerateUUID(),
+		Channel:         channelSlug,
+		Namespace:       namespace,
+		GameMode:        gameMode,
+		Joinable:        true,
+		PartyAttributes: map[string]interface{}{},
+	}
+
+	tickets := generateRequest(channelSlug, 3, 1)
+	tickets[0].PartyID = "party2"
+	tickets[1].PartyID = "party3"
+	tickets[2].PartyID = "party4"
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+	channel := models.Channel{
+		Ruleset: models.RuleSet{
+			AllianceRule: models.AllianceRule{
+				MinNumber:       1,
+				MaxNumber:       2,
+				PlayerMinNumber: 1,
+				PlayerMaxNumber: 5,
+			},
+		},
+	}
+	updatedSessions, _, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, channel)
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, updatedSessions, session, "matched session should contain the session")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.Equal(t, 0, rebalance_v1.CountMemberDiff(session.MatchingAllies), "member diff should be 0")
+}
+
+func TestMatchSession_MultiTickets_Success(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_WithClientVersion_Success", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("4v4", 2, []int{2, 2})
+	tickets := generateRequest("4v4", 2, 2)
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 2,
+			PlayerMaxNumber: 4,
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, matchedSessions, session, "matched session should contain the session")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.Contains(t, matchedTickets, tickets[1], "matched tickets should contain the ticket")
+	assert.True(t, containsTicket(session, &tickets[0]), "matched session should contain the ticket")
+	assert.True(t, containsTicket(session, &tickets[1]), "matched session should contain the ticket")
+}
+
+func TestMatchSession_WithClientVersion_Success(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_WithClientVersion_Success", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.ClientVersion = "test-version.1.0" //nolint:goconst
+
+	tickets := generateRequest("2v2", 1, 1)
+	tickets[0].PartyAttributes[models.AttributeClientVersion] = "test-version.1.0"
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, matchedSessions, session, "matched session should contain the session")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.True(t, containsTicket(session, &tickets[0]), "matched session should contain the ticket")
+}
+
+func TestMatchSession_WithClientVersion_Mismatch_Failed(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_WithClientVersion_Mismatch_Failed", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.ClientVersion = "test-version.1.0"
+
+	tickets := generateRequest("2v2", 1, 1)
+	tickets[0].PartyAttributes[models.AttributeClientVersion] = "test-version.2.0"
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.NotContains(t, matchedSessions, session, "matched session should not contain the session")
+	assert.NotContains(t, matchedTickets, tickets[0], "matched tickets should not contain the ticket")
+	assert.False(t, containsTicket(session, &tickets[0]), "matched session should not contain the ticket")
+}
+
+func TestMatchSession_WithClientVersion_Blank_Failed(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_WithClientVersion_Blank_Failed", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.ClientVersion = "test-version.1.0"
+
+	tickets := generateRequest("2v2", 1, 1)
+	tickets[0].PartyAttributes[models.AttributeClientVersion] = ""
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.NotContains(t, matchedSessions, session, "matched session should not contain the session")
+	assert.NotContains(t, matchedTickets, tickets[0], "matched tickets should not contain the ticket")
+	assert.False(t, containsTicket(session, &tickets[0]), "matched session should not contain the ticket")
+}
+
+func TestMatchSession_WithServerName_Success(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_WithClientVersion_Success", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.ServerName = "test-version.1.0"
+
+	tickets := generateRequest("2v2", 1, 1)
+	tickets[0].PartyAttributes[models.AttributeServerName] = "test-version.1.0"
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, matchedSessions, session, "matched session should contain the session")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.True(t, containsTicket(session, &tickets[0]), "matched session should contain the ticket")
+}
+
+func TestMatchSession_WithServerName_Mismatch_Failed(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_WithClientVersion_Mismatch_Failed", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.ServerName = "test-version.1.0"
+
+	tickets := generateRequest("2v2", 1, 1)
+	tickets[0].PartyAttributes[models.AttributeServerName] = "test-version.2.0"
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.NotContains(t, matchedSessions, session, "matched session should not contain the session")
+	assert.NotContains(t, matchedTickets, tickets[0], "matched tickets should not contain the ticket")
+	assert.False(t, containsTicket(session, &tickets[0]), "matched session should not contain the ticket")
+}
+
+func TestMatchSession_WithServerName_Blank_Failed(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_WithServerName_Blank_Failed", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 1, []int{2})
+	session.ServerName = "v1.500"
+
+	tickets := generateRequestWithMMR("2v2", 1, 1, 70)
+	tickets[0].PartyAttributes[models.AttributeServerName] = ""
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       1,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	updatedSessions, satisfiedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.NotContains(t, updatedSessions, session, "updated session should not contain the session")
+	assert.NotContains(t, satisfiedSessions, session, "satisfied session should not contain the session")
+	assert.NotContains(t, matchedTickets, tickets[0], "matched tickets should not contain the ticket")
+	assert.False(t, containsTicket(session, &tickets[0]), "matched session should not contain the ticket")
+}
+
+func TestMatchSession_WithRegion_Success(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_WithRegion_Success", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.Region = "us-west"
+
+	tickets := generateRequest("2v2", 1, 1)
+	tickets[0].PartyAttributes[models.AttributeLatencies] = `{ "us-west": 50 }`
+	tickets[0].LatencyMap["us-west"] = 50
+	tickets[0].SortedLatency = []models.Region{{Region: "us-west", Latency: 50}}
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, matchedSessions, session, "matched session should contain the session")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.True(t, containsTicket(session, &tickets[0]), "matched session should contain the ticket")
+
+	// just to make sure that ticket source data is not changed
+	// because we replace all dash into underscore in region for bleve query
+	assert.Equal(t, tickets[0].LatencyMap["us-west"], 50, "ticket LatencyMap should not change")
+	assert.Equal(t, tickets[0].SortedLatency[0].Region, "us-west", "ticket SortedLatency map should not change")
+}
+
+func TestMatchSession_WithRegion_Failed(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_WithRegion_Failed", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.Region = "eu"
+
+	tickets := generateRequest("2v2", 1, 1)
+	tickets[0].PartyAttributes[models.AttributeLatencies] = `{ "us-west": 100 }`
+	tickets[0].LatencyMap["us-west"] = 100
+	tickets[0].SortedLatency = []models.Region{{Region: "us-west", Latency: 100}}
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.NotContains(t, matchedSessions, session, "matched session should not contain the session")
+	assert.NotContains(t, matchedTickets, tickets[0], "matched tickets should not contain the ticket")
+	assert.False(t, containsTicket(session, &tickets[0]), "matched session should not contain the ticket")
+}
+
+func TestMatchSession_WithMultiRegion_2ndTry_Success(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_WithMultiRegion_Success", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.Region = "us-west"
+
+	tickets := generateRequest("2v2", 1, 1)
+	tickets[0].PartyAttributes = map[string]interface{}{models.AttributeLatencies: `{ "eu": 100, "us-west": 100 }`, models.AttributeMatchAttempt: float64(1)}
+	tickets[0].LatencyMap = map[string]int{"eu": 100, "us-west": 100}
+	tickets[0].SortedLatency = []models.Region{{Region: "eu", Latency: 100}, {Region: "us-west", Latency: 100}}
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, matchedSessions, session, "matched session should contain the session")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.True(t, containsTicket(session, &tickets[0]), "matched session should contain the ticket")
+}
+
+func TestMatchSession_WithAnyRegion_Failed(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_WithAnyRegion_Failed", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.Region = "ap-southeast-1"
+
+	tickets := generateRequest("2v2", 1, 1)
+	tickets[0].PartyAttributes = map[string]interface{}{models.AttributeLatencies: `{ "us-east-1": 100 }`, models.AttributeMatchAttempt: float64(1)}
+	tickets[0].LatencyMap = map[string]int{"us-east-1": 100}
+	tickets[0].SortedLatency = []models.Region{{Region: "us-east-1", Latency: 100}}
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.NotContains(t, matchedSessions, session, "matched session should contain the session")
+	assert.NotContains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.False(t, containsTicket(session, &tickets[0]), "matched session should contain the ticket")
+}
+
+func TestMatchSession_WithMMR_Success(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_WithMMR_Success", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.Region = "eu"
+	session.PartyAttributes[models.AttributeMemberAttr] = map[string]interface{}{"mmr": float64(80)}
+
+	tickets := generateRequestWithMMR("2v2", 1, 1, 70)
+	tickets[0].PartyAttributes[models.AttributeLatencies] = `{ "eu": 50 }` //nolint:goconst
+	tickets[0].LatencyMap = map[string]int{"eu": 50}
+	tickets[0].SortedLatency = []models.Region{
+		{
+			Region:  "eu",
+			Latency: 50,
+		},
+	}
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+		MatchingRule: []models.MatchingRule{
+			{
+				Attribute: "mmr",
+				Criteria:  "distance",
+				Reference: float64(10),
+			},
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, matchedSessions, session, "matched session should contain the session")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.True(t, containsTicket(session, &tickets[0]), "matched session should contain the ticket")
+}
+
+func TestMatchSession_WithFlexMMR_Success(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_WithFlexMMR_Success", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.Region = "eu"
+	session.PartyAttributes[models.AttributeMemberAttr] = map[string]interface{}{"mmr": float64(100)}
+
+	tickets := generateRequestWithMMR("2v2", 1, 1, 70)
+	tickets[0].PartyAttributes[models.AttributeLatencies] = `{ "eu": 50 }`
+	tickets[0].LatencyMap = map[string]int{"eu": 50}
+	tickets[0].SortedLatency = []models.Region{{Region: "eu", Latency: 50}}
+	tickets[0].CreatedAt = time.Now().UTC().Unix() - int64(5*time.Second)
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+		MatchingRule: []models.MatchingRule{
+			{
+				Attribute: "mmr",
+				Criteria:  "distance",
+				Reference: float64(10),
+			},
+		},
+		FlexingRule: []models.FlexingRule{
+			{
+				Duration: 5,
+				MatchingRule: models.MatchingRule{
+					Attribute: "mmr",
+					Criteria:  "distance",
+					Reference: float64(30),
+				},
+			},
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, matchedSessions, session, "matched session should contain the session")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.True(t, containsTicket(session, &tickets[0]), "matched session should contain the ticket")
+}
+
+func TestMatchSession_WithFlexMMR_Failed(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_WithFlexMMR_Failed", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.Region = "eu"
+	session.PartyAttributes[models.AttributeMemberAttr] = map[string]interface{}{"mmr": float64(100)}
+
+	tickets := generateRequestWithMMR("2v2", 1, 1, 70)
+	tickets[0].PartyAttributes[models.AttributeLatencies] = `{ "eu": 50 }`
+	tickets[0].LatencyMap = map[string]int{"eu": 50}
+	tickets[0].SortedLatency = []models.Region{{Region: "eu", Latency: 50}}
+	tickets[0].CreatedAt = time.Now().UTC().Add(-6 * time.Second).Unix()
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+		MatchingRule: []models.MatchingRule{
+			{
+				Attribute: "mmr",
+				Criteria:  "distance",
+				Reference: float64(10),
+			},
+		},
+		FlexingRule: []models.FlexingRule{
+			{
+				Duration: int64(5),
+				MatchingRule: models.MatchingRule{
+					Attribute: "mmr",
+					Criteria:  "distance",
+					Reference: float64(20),
+				},
+			},
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.NotContains(t, matchedSessions, session, "matched session should not contain the session")
+	assert.NotContains(t, matchedTickets, tickets[0], "matched tickets should not contain the ticket")
+	assert.False(t, containsTicket(session, &tickets[0]), "matched session should not contain the ticket")
+}
+
+func TestMatchSession_WithCustomAttribute_Success(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_WithCustomAttribute_Success", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.PartyAttributes["map"] = "area.1-10" //nolint:goconst
+
+	tickets := generateRequestWithMMR("2v2", 1, 1, 70)
+	tickets[0].PartyAttributes["map"] = "area.1-10"
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, matchedSessions, session, "matched session should contain the session")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.True(t, containsTicket(session, &tickets[0]), "matched session should contain the ticket")
+}
+
+func TestMatchSession_RoleBased_Success(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_RoleBased_Success", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.MatchingAllies[0].MatchingParties[0].PartyMembers[0].ExtraAttributes = map[string]interface{}{models.ROLE: "carry"}
+	session.MatchingAllies[0].MatchingParties[0].PartyMembers[1].ExtraAttributes = map[string]interface{}{models.ROLE: "support"}
+	session.MatchingAllies[1].MatchingParties[0].PartyMembers[0].ExtraAttributes = map[string]interface{}{models.ROLE: "carry"}
+
+	tickets := generateRequest("2v2", 1, 1)
+	ticket := tickets[0]
+	ticket.PartyMembers[0].ExtraAttributes[models.ROLE] = models.AnyRole
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+			Combination: models.Combination{
+				HasCombination: true,
+				Alliances: [][]models.Role{
+					{
+						{Name: "carry", Min: 1, Max: 1},
+						{Name: "support", Min: 1, Max: 1},
+					},
+				},
+			},
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, matchedSessions, session, "matched session should contain the session")
+
+	// ticket's role should be assigned as support
+	ticket.PartyMembers[0].ExtraAttributes[models.ROLE] = "support"
+	assert.Contains(t, matchedTickets, ticket, "matched tickets should contain the ticket")
+	assert.True(t, containsTicket(session, &ticket), "matched session should contain the ticket")
+}
+
+func TestMatchSession_RoleBased_Failed(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_RoleBased_Failed", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.MatchingAllies[0].MatchingParties[0].PartyMembers[0].ExtraAttributes = map[string]interface{}{models.ROLE: "carry"}
+	session.MatchingAllies[0].MatchingParties[0].PartyMembers[1].ExtraAttributes = map[string]interface{}{models.ROLE: "support"}
+	session.MatchingAllies[1].MatchingParties[0].PartyMembers[0].ExtraAttributes = map[string]interface{}{models.ROLE: "carry"}
+
+	tickets := generateRequest("2v2", 1, 1)
+	ticket := tickets[0]
+	ticket.PartyMembers[0].ExtraAttributes[models.ROLE] = "carry"
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+			Combination: models.Combination{
+				HasCombination: true,
+				Alliances: [][]models.Role{
+					{
+						{Name: "carry", Min: 1, Max: 1},
+						{Name: "support", Min: 1, Max: 1},
+					},
+				},
+			},
+		},
+	}
+
+	// the ticket should not be append to session because we only need 1 more support
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.NotContains(t, matchedSessions, session, "matched session should not contain the session")
+	assert.NotContains(t, matchedTickets, ticket, "matched tickets should contain the ticket")
+	assert.False(t, containsTicket(session, &ticket), "matched session should contain the ticket")
+}
+
+func TestMatchSession_WithCustomAttribute_Mismatch_Failed(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_WithCustomAttribute_Mismatch_Failed", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.PartyAttributes["map"] = "area.2-10"
+
+	tickets := generateRequestWithMMR("2v2", 1, 1, 70)
+	tickets[0].PartyAttributes["map"] = "area.1-10"
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.NotContains(t, matchedSessions, session, "matched session should not contain the session")
+	assert.NotContains(t, matchedTickets, tickets[0], "matched tickets should not contain the ticket")
+	assert.False(t, containsTicket(session, &tickets[0]), "matched session should not contain the ticket")
+}
+
+func TestMatchSession_UpdatedSessions_Success(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_UpdatedSessions_Success", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("4v4", 2, []int{2, 2})
+	tickets := generateRequest("4v4", 1, 2)
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 2,
+			PlayerMaxNumber: 4,
+		},
+	}
+
+	updatedSessions, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, updatedSessions, session, "updated session should contain the session")
+	assert.NotContains(t, matchedSessions, session, "matched session should not contain the session")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.True(t, containsTicket(session, &tickets[0]), "matched session should contain the ticket")
+}
+
+func TestMatchSession_UpdatedSessions2_Success(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_UpdatedSessions2_Success", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("3v3v3", 1, []int{1})
+	tickets := generateRequest("3v3v3", 1, 1)
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       1,
+			MaxNumber:       3,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 3,
+		},
+	}
+
+	updatedSessions, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, updatedSessions, session, "updated session should contain the session")
+	assert.NotContains(t, matchedSessions, session, "matched session should not contain the session")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.True(t, containsTicket(session, &tickets[0]), "matched session should contain the ticket")
+}
+
+func TestMatchSession_Blocked_ByTicket(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_Blocked_ByTicket", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	tickets := generateRequest("2v2", 1, 1)
+
+	tickets[0].PartyAttributes[models.AttributeBlocked] = []interface{}{session.MatchingAllies[0].MatchingParties[0].PartyMembers[0].UserID}
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.NotContains(t, matchedSessions, session, "matched session should contain the session")
+	assert.NotContains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.False(t, containsTicket(session, &tickets[0]), "matched session should contain the ticket")
+}
+
+func TestMatchSession_Blocked_BySession(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_Blocked_BySession", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	tickets := generateRequest("2v2", 1, 1)
+
+	session.PartyAttributes[models.AttributeBlocked] = []interface{}{tickets[0].PartyMembers[0].UserID}
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.NotContains(t, matchedSessions, session, "matched session should contain the session")
+	assert.NotContains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.False(t, containsTicket(session, &tickets[0]), "matched session should contain the ticket")
+}
+
+func TestMatchSession_SubGameMode(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_SubGameMode", "")
+	t.Cleanup(func() { scope.Finish() })
+
+	type args struct {
+		tickets  []models.MatchmakingRequest
+		sessions []*models.MatchmakingResult
+		channel  models.Channel
+	}
+	type testItem struct {
+		name                  string
+		args                  args
+		wantUpdatedSessions   []*models.MatchmakingResult
+		wantSatisfiedSessions []*models.MatchmakingResult
+		// wantSatisfiedTickets  []*models.MatchmakingRequest
+		wantErr bool
+	}
+	tests := []testItem{}
+
+	contains := func(tt *testing.T, got, expected *models.MatchmakingResult) {
+		tt.Helper()
+		expectedCount := 0
+		for _, expectedAlly := range expected.MatchingAllies {
+			expectedCount += len(expectedAlly.MatchingParties)
+		}
+		gotCount := 0
+		for _, gotAlly := range got.MatchingAllies {
+		gotloop:
+			for _, gotParty := range gotAlly.MatchingParties {
+				for _, expectedAlly := range expected.MatchingAllies {
+					for _, expectedParty := range expectedAlly.MatchingParties {
+						if expectedParty.PartyID == gotParty.PartyID {
+							gotCount++
+							continue gotloop
+						}
+					}
+				}
+			}
+		}
+		if !assert.Equal(tt, expectedCount, gotCount, "unexpected party found in match result") {
+			fmt.Println("got:")
+			spew.Dump(got)
+			fmt.Println("expected:")
+			spew.Dump(expected)
+			return
+		}
+
+		// assert that the resulting sub game modes are correct
+		if v, ok := expected.PartyAttributes[models.AttributeSubGameMode]; ok {
+			names, ok := v.([]interface{})
+			assert.True(tt, ok, "expected sub gamemode is not array of string")
+
+			v, o := got.PartyAttributes[models.AttributeSubGameMode]
+			if !assert.True(tt, o, "got empty subgamemode") {
+				fmt.Println("got:")
+				spew.Dump(got)
+				fmt.Println("expected:")
+				spew.Dump(expected)
+				return
+			}
+
+			gotNames, ok := v.([]interface{})
+			assert.True(tt, ok, "got sub gamemode is not array of string")
+
+			for _, n1 := range names {
+				found := false
+				for _, n2 := range gotNames {
+					if n1 == n2 {
+						found = true
+						break
+					}
+				}
+				if !assert.True(tt, found, "expected sub gamemode not found: "+n1.(string)) {
+					fmt.Println("got:")
+					spew.Dump(got)
+					fmt.Println("expected:")
+					spew.Dump(expected)
+					return
+				}
+			}
+
+			if !assert.Equal(tt, len(names), len(gotNames), "sub game modes are not of same length") {
+				fmt.Println("got:")
+				spew.Dump(got)
+				fmt.Println("expected:")
+				spew.Dump(expected)
+				return
+			}
+		}
+	}
+
+	// case 1
+	{
+		tickets := generateRequest("", 2, 1)
+		tickets[0].PartyAttributes[models.AttributeSubGameMode] = []interface{}{"deathmatch", "td", "ffa"}
+		tickets[1].PartyAttributes[models.AttributeSubGameMode] = []interface{}{"deathmatch", "td"}
+
+		session := generateSession("", 1, []int{1})
+		session.PartyAttributes[models.AttributeSubGameMode] = []interface{}{"deathmatch", "ffa", "solo"}
+
+		tests = append(tests, testItem{
+			name: "should find deathmatch & ffa",
+			args: args{
+				tickets:  tickets,
+				sessions: []*models.MatchmakingResult{session},
+				channel: models.Channel{
+					Ruleset: models.RuleSet{
+						AllianceRule: models.AllianceRule{
+							MinNumber:       1,
+							MaxNumber:       1,
+							PlayerMinNumber: 1,
+							PlayerMaxNumber: 1,
+						},
+						SubGameModes: map[string]models.SubGameMode{
+							"deathmatch": {
+								Name: "deathmatch",
+								AllianceRule: models.AllianceRule{
+									MinNumber:       1,
+									MaxNumber:       1,
+									PlayerMinNumber: 1,
+									PlayerMaxNumber: 2,
+								},
+							},
+							"ffa": {
+								Name: "ffa",
+								AllianceRule: models.AllianceRule{
+									MinNumber:       1,
+									MaxNumber:       1,
+									PlayerMinNumber: 1,
+									PlayerMaxNumber: 3,
+								},
+							},
+							"td": {
+								Name: "td",
+								AllianceRule: models.AllianceRule{
+									MinNumber:       2,
+									MaxNumber:       2,
+									PlayerMinNumber: 1,
+									PlayerMaxNumber: 3,
+								},
+							},
+							"solo": {
+								Name: "solo",
+								AllianceRule: models.AllianceRule{
+									MinNumber:       1,
+									MaxNumber:       1,
+									PlayerMinNumber: 1,
+									PlayerMaxNumber: 1,
+								},
+							},
+						},
+					},
+				},
+			},
+			wantUpdatedSessions: []*models.MatchmakingResult{
+				{
+					MatchingAllies: []models.MatchingAlly{
+						appendMatchingAlly(session.MatchingAllies[0], tickets[0]),
+					},
+					PartyAttributes: map[string]interface{}{
+						models.AttributeSubGameMode: []interface{}{"deathmatch", "ffa"},
+					},
+				},
+			},
+		})
+	}
+
+	// case 2
+	{
+		tickets := generateRequest("", 2, 1)
+		tickets[0].PartyAttributes[models.AttributeSubGameMode] = []interface{}{"deathmatch", "td", "ffa"}
+		tickets[1].PartyAttributes[models.AttributeSubGameMode] = []interface{}{"deathmatch", "solo", "ffa"}
+
+		session := generateSession("", 1, []int{1})
+		session.PartyAttributes[models.AttributeSubGameMode] = []interface{}{"deathmatch", "ffa", "solo"}
+
+		tests = append(tests, testItem{
+			name: "should find ffa",
+			args: args{
+				tickets:  tickets,
+				sessions: []*models.MatchmakingResult{session},
+				channel: models.Channel{
+					Ruleset: models.RuleSet{
+						AllianceRule: models.AllianceRule{
+							MinNumber:       1,
+							MaxNumber:       1,
+							PlayerMinNumber: 1,
+							PlayerMaxNumber: 1,
+						},
+						SubGameModes: map[string]models.SubGameMode{
+							"deathmatch": {
+								Name: "deathmatch",
+								AllianceRule: models.AllianceRule{
+									MinNumber:       1,
+									MaxNumber:       1,
+									PlayerMinNumber: 1,
+									PlayerMaxNumber: 2,
+								},
+							},
+							"ffa": {
+								Name: "ffa",
+								AllianceRule: models.AllianceRule{
+									MinNumber:       1,
+									MaxNumber:       1,
+									PlayerMinNumber: 1,
+									PlayerMaxNumber: 3,
+								},
+							},
+							"td": {
+								Name: "td",
+								AllianceRule: models.AllianceRule{
+									MinNumber:       2,
+									MaxNumber:       2,
+									PlayerMinNumber: 1,
+									PlayerMaxNumber: 3,
+								},
+							},
+							"solo": {
+								Name: "solo",
+								AllianceRule: models.AllianceRule{
+									MinNumber:       1,
+									MaxNumber:       1,
+									PlayerMinNumber: 1,
+									PlayerMaxNumber: 1,
+								},
+							},
+						},
+					},
+				},
+			},
+			wantSatisfiedSessions: []*models.MatchmakingResult{
+				{
+					MatchingAllies: []models.MatchingAlly{
+						appendMatchingAlly(session.MatchingAllies[0], tickets...),
+					},
+					PartyAttributes: map[string]interface{}{
+						models.AttributeSubGameMode: []interface{}{"ffa"},
+					},
+				},
+			},
+		})
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mm := NewMatchmaker()
+			updated, satisfied, _, err := mm.MatchSessions(scope, "", "", tt.args.tickets, tt.args.sessions, tt.args.channel)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Matchmaker.MatchSession() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			assert.Equal(t, len(tt.wantUpdatedSessions), len(updated), "unexpected updated session count. testname: %s, expected: %d, actual: %d", tt.name, len(tt.wantUpdatedSessions), len(updated))
+			assert.Equal(t, len(tt.wantSatisfiedSessions), len(satisfied), "unexpected satisfied session count. testname: %s, expected: %d, actual: %d", tt.name, len(tt.wantSatisfiedSessions), len(satisfied))
+
+			if len(tt.wantUpdatedSessions) > 0 {
+				for i, result := range updated {
+					contains(t, result, tt.wantUpdatedSessions[i])
+				}
+			}
+
+			if len(tt.wantSatisfiedSessions) > 0 {
+				for i, result := range satisfied {
+					contains(t, result, tt.wantSatisfiedSessions[i])
+				}
+			}
+		})
+	}
+}
+
+func TestMatchSession_MatchOptions(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_MatchOptions", "")
+	t.Cleanup(func() { scope.Finish() })
+
+	type args struct {
+		tickets  []models.MatchmakingRequest
+		sessions []*models.MatchmakingResult
+		channel  models.Channel
+	}
+	type testItem struct {
+		name                  string
+		args                  args
+		wantUpdatedSessions   []*models.MatchmakingResult
+		wantSatisfiedSessions []*models.MatchmakingResult
+		// wantSatisfiedTickets  []*models.MatchmakingRequest
+		wantErr bool
+	}
+	tests := []testItem{}
+
+	// case 1
+	{
+		tickets := generateRequest("", 1, 1)
+		tickets[0].PartyAttributes["platform"] = []interface{}{"xbox", "pc"}
+
+		session := generateSession("", 1, []int{1})
+		session.PartyAttributes["platform"] = []interface{}{"xbox"}
+
+		session2 := generateSession("", 1, []int{1})
+		session2.PartyAttributes["platform"] = []interface{}{"ps4"}
+
+		tests = append(tests, testItem{
+			name: "should find xbox",
+			args: args{
+				tickets:  tickets,
+				sessions: []*models.MatchmakingResult{session2, session},
+				channel: models.Channel{
+					Ruleset: models.RuleSet{
+						AllianceRule: models.AllianceRule{
+							MinNumber:       1,
+							MaxNumber:       2,
+							PlayerMinNumber: 1,
+							PlayerMaxNumber: 1,
+						},
+						MatchOptions: models.MatchOptionRule{
+							Options: []models.MatchOption{
+								{
+									Name: "platform",
+									Type: models.MatchOptionTypeAny,
+								},
+							},
+						},
+					},
+				},
+			},
+			wantSatisfiedSessions: []*models.MatchmakingResult{
+				session,
+			},
+		})
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mm := NewMatchmaker()
+			updated, satisfied, _, err := mm.MatchSessions(scope, "", "", tt.args.tickets, tt.args.sessions, tt.args.channel)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Matchmaker.MatchSession() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			assert.Equal(t, len(tt.wantUpdatedSessions), len(updated), "unexpected updated session count. testname: %s, expected: %d, actual: %d", tt.name, len(tt.wantUpdatedSessions), len(updated))
+			assert.Equal(t, len(tt.wantSatisfiedSessions), len(satisfied), "unexpected satisfied session count. testname: %s, expected: %d, actual: %d", tt.name, len(tt.wantSatisfiedSessions), len(satisfied))
+
+			for _, v := range tt.wantUpdatedSessions {
+				assert.Contains(t, updated, v)
+			}
+
+			for _, v := range tt.wantSatisfiedSessions {
+				assert.Contains(t, satisfied, v)
+			}
+		})
+	}
+}
+
+func TestMatchSession_AvoidMatchWithSelf(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_AvoidMatchWithSelf", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+
+	tickets := generateRequest("2v2", 1, 1)
+	tickets[0].PartyMembers[0].UserID = session.MatchingAllies[0].MatchingParties[0].PartyMembers[0].UserID
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.NotContains(t, matchedSessions, session, "matched session should not contain the session")
+	assert.NotContains(t, matchedTickets, tickets[0], "matched tickets should not contain the ticket")
+	assert.False(t, containsTicket(session, &tickets[0]), "matched session should not contain the ticket")
+}
+
+func TestMatchSession_MatchBasedOnRegion(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_MatchBasedOnRegion", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.Region = "us-west-1"
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	// not match based on region
+	tickets := generateRequest("2v2", 1, 1)
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.NotContains(t, matchedSessions, session, "matched session should not contain the session")
+	assert.NotContains(t, matchedTickets, tickets[0], "matched tickets should not contain the ticket")
+	assert.False(t, containsTicket(session, &tickets[0]), "matched session should not contain the ticket")
+
+	// match based on region
+	tickets = generateRequest("2v2", 2, 1)
+	tickets[0].PartyAttributes = map[string]interface{}{models.AttributeLatencies: `{ "us-west-1": 100 }`}
+	tickets[0].LatencyMap = map[string]int{"us-west-1": 100}
+	tickets[0].SortedLatency = []models.Region{{Region: "us-west-1", Latency: 100}}
+	tickets[1].PartyAttributes = map[string]interface{}{models.AttributeLatencies: `{ "us-west-1": 10 }`}
+	tickets[1].LatencyMap = map[string]int{"us-west-1": 10}
+	tickets[1].SortedLatency = []models.Region{{Region: "us-west-1", Latency: 10}}
+	_, matchedSessions, matchedTickets, err = matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, matchedSessions, session, "matched session should contain the session")
+	assert.NotContains(t, matchedTickets, tickets[0], "matched tickets should not contain first ticket because the latency is higher than second ticket")
+	assert.False(t, containsTicket(session, &tickets[0]), "matched session should not contain first ticket because the latency is higher than second ticket")
+	assert.Contains(t, matchedTickets, tickets[1], "matched tickets should contain the second ticket")
+	assert.True(t, containsTicket(session, &tickets[1]), "matched session should contain the second ticket")
+	assert.Equal(t, matchedTickets[0].LatencyMap["us-west-1"], 10, "matched ticket should contain the second ticket with latency 10")
+}
+
+func TestGenerateQueryStringBySession(t *testing.T) {
+	tests := []struct {
+		Name    string
+		RuleSet models.RuleSet
+		Session models.MatchmakingResult
+		Wants   []string
+	}{
+		{
+			Name: "should generate mmr query",
+			RuleSet: models.RuleSet{
+				MatchingRule: []models.MatchingRule{
+					{
+						Attribute: "mmr",
+						Criteria:  distanceCriteria,
+						Reference: 10,
+					},
+				},
+			},
+			Session: models.MatchmakingResult{
+				PartyID: "partyA",
+				PartyAttributes: map[string]interface{}{
+					"ping":              50,
+					memberAttributesKey: map[string]interface{}{"mmr": float64(78)},
+				},
+			},
+			Wants: []string{
+				"+party_attributes.member_attributes.mmr:>=68",
+				"+party_attributes.member_attributes.mmr:<=88",
+			},
+		},
+		{
+			Name: "should include sub game mode query if exists",
+			RuleSet: models.RuleSet{
+				MatchingRule: []models.MatchingRule{
+					{
+						Attribute: "mmr",
+						Criteria:  distanceCriteria,
+						Reference: 10,
+					},
+				},
+				SubGameModes: map[string]models.SubGameMode{
+					"SGM": {
+						Name: "SGM",
+						AllianceRule: models.AllianceRule{
+							MinNumber:       2,
+							MaxNumber:       2,
+							PlayerMinNumber: 2,
+							PlayerMaxNumber: 2,
+						},
+					},
+					"GG": {
+						Name: "GG",
+						AllianceRule: models.AllianceRule{
+							MinNumber:       2,
+							MaxNumber:       2,
+							PlayerMinNumber: 1,
+							PlayerMaxNumber: 2,
+						},
+					},
+				},
+			},
+			Session: models.MatchmakingResult{
+				PartyID: "partyA",
+				PartyAttributes: map[string]interface{}{
+					"ping":                      50,
+					models.AttributeSubGameMode: []interface{}{"SGM", "GG"},
+				},
+			},
+			Wants: []string{
+				`party_attributes.sub_game_mode:"SGM"`,
+				`party_attributes.sub_game_mode:"GG"`,
+			},
+		},
+		{
+			Name: "should include match option if exists",
+			RuleSet: models.RuleSet{
+				MatchOptions: models.MatchOptionRule{
+					Options: []models.MatchOption{
+						{
+							Name: "match_option_a",
+							Type: models.MatchOptionTypeAll,
+						},
+						{
+							Name: "match_option_b",
+							Type: models.MatchOptionTypeAny,
+						},
+						{
+							Name: "match_option_c",
+							Type: models.MatchOptionTypeUnique,
+						},
+					},
+				},
+			},
+			Session: models.MatchmakingResult{
+				PartyID: "partyA",
+				PartyAttributes: map[string]interface{}{
+					"ping":           50,
+					"match_option_a": "100",
+					"match_option_b": "200",
+					"match_option_c": "300",
+				},
+			},
+			Wants: []string{
+				`+party_attributes.match_option_a:"100"`,
+				`+party_attributes.match_option_a:*`,
+				`+party_attributes.match_option_b:/(200)/`,
+				`+party_attributes.match_option_b:*`,
+				`+party_attributes.match_option_c:*`,
+				`-party_attributes.match_option_c:"300"`,
+			},
+		},
+		{
+			Name: "key in party attributes should include in query as a must",
+			RuleSet: models.RuleSet{
+				MatchingRule: []models.MatchingRule{
+					{
+						Attribute: "rank_rating",
+						Criteria:  distanceCriteria,
+						Reference: 10,
+					},
+				},
+			},
+			Session: models.MatchmakingResult{
+				PartyID: "partyA",
+				PartyAttributes: map[string]interface{}{
+					"must_match_this_attribute": "50",
+				},
+			},
+			Wants: []string{
+				`+party_attributes.must_match_this_attribute:"50"`,
+			},
+		},
+		{
+			Name: "blocked player in party attributes should include in query",
+			RuleSet: models.RuleSet{
+				MatchingRule: []models.MatchingRule{
+					{
+						Attribute: "mmr",
+						Criteria:  distanceCriteria,
+						Reference: 10,
+					},
+				},
+			},
+			Session: models.MatchmakingResult{
+				PartyID: "partyA",
+				PartyAttributes: map[string]interface{}{
+					models.AttributeBlocked: []interface{}{
+						"userA", "userB",
+					},
+				},
+			},
+			Wants: []string{
+				`-party_members.user_id:userA`,
+				`-party_members.user_id:userB`,
+			},
+		},
+		{
+			Name: "if no server name specified in party attributes wildcard should be used in the query",
+			RuleSet: models.RuleSet{
+				MatchingRule: []models.MatchingRule{
+					{
+						Attribute: "mmr",
+						Criteria:  distanceCriteria,
+						Reference: 10,
+					},
+				},
+			},
+			Session: models.MatchmakingResult{
+				PartyID:         "partyA",
+				PartyAttributes: map[string]interface{}{},
+			},
+			Wants: []string{
+				`-party_attributes.server_name:*`,
+			},
+		},
+		{
+			Name: "if server name specified in party attributes should be included in the query",
+			RuleSet: models.RuleSet{
+				MatchingRule: []models.MatchingRule{
+					{
+						Attribute: "mmr",
+						Criteria:  distanceCriteria,
+						Reference: 10,
+					},
+				},
+			},
+			Session: models.MatchmakingResult{
+				ServerName: "server-1.0",
+			},
+			Wants: []string{
+				`+party_attributes.server_name:"server-1.0"`,
+			},
+		},
+		{
+			Name: "if no client version specified in party attributes wildcard should be used in the query",
+			RuleSet: models.RuleSet{
+				MatchingRule: []models.MatchingRule{
+					{
+						Attribute: "rank_rating",
+						Criteria:  distanceCriteria,
+						Reference: 10,
+					},
+				},
+			},
+			Session: models.MatchmakingResult{
+				PartyID:         "partyA",
+				PartyAttributes: map[string]interface{}{},
+			},
+			Wants: []string{
+				`-party_attributes.client_version:*`,
+			},
+		},
+		{
+			Name: "if client version specified in party attributes should be included in the query",
+			RuleSet: models.RuleSet{
+				MatchingRule: []models.MatchingRule{
+					{
+						Attribute: "rank_rating",
+						Criteria:  distanceCriteria,
+						Reference: 10,
+					},
+				},
+			},
+			Session: models.MatchmakingResult{
+				ClientVersion: "client_version-1.0",
+			},
+			Wants: []string{
+				`+party_attributes.client_version:"client_version-1.0"`,
+			},
+		},
+		{
+			Name:    "should have session region",
+			RuleSet: models.RuleSet{},
+			Session: models.MatchmakingResult{
+				Region: "us-west-1",
+			},
+			Wants: []string{
+				`+latency_map.us_west_1:>=0`,
+			},
+		},
+		{
+			Name: "should avoid match with same party id",
+			RuleSet: models.RuleSet{
+				MatchingRule: []models.MatchingRule{
+					{
+						Attribute: "mmr",
+						Criteria:  distanceCriteria,
+						Reference: 10,
+					},
+				},
+			},
+			Session: models.MatchmakingResult{
+				MatchingAllies: []models.MatchingAlly{
+					{MatchingParties: []models.MatchingParty{
+						{PartyID: "partyA"},
+					}},
+				},
+			},
+			Wants: []string{
+				`-party_id:partyA`,
+			},
+		},
+		{
+			Name: "should avoid match with same user id",
+			RuleSet: models.RuleSet{
+				MatchingRule: []models.MatchingRule{
+					{
+						Attribute: "rank_rating",
+						Criteria:  distanceCriteria,
+						Reference: 10,
+					},
+				},
+			},
+			Session: models.MatchmakingResult{
+				MatchingAllies: []models.MatchingAlly{
+					{MatchingParties: []models.MatchingParty{
+						{
+							PartyID: "partyA",
+							PartyMembers: []models.PartyMember{
+								{
+									UserID: "userA",
+								},
+								{
+									UserID: "userB",
+								},
+							},
+						},
+					}},
+				},
+			},
+			Wants: []string{
+				`-party_members.user_id:userA`,
+				`-party_members.user_id:userB`,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.Name, func(t *testing.T) {
+			got := generateQueryStringBySession(tt.RuleSet, tt.Session)
+			for _, want := range tt.Wants {
+				require.Contains(t, got, want)
+			}
+		})
+	}
+}
+
+func TestMatchSession_MatchBasedOnRegion_RegionRate(t *testing.T) {
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_MatchBasedOnRegion_RegionRate", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.Region = "us-west-1"
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		RegionExpansionRateMs: 1000,
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	channel := models.Channel{Ruleset: ruleset}
+
+	Now = func() time.Time { return time.Date(2023, 1, 1, 1, 0, 0, 0, time.UTC) }
+	defer func() { Now = time.Now }()
+
+	// match based on region
+	tickets := generateRequest("2v2", 2, 1)
+	tickets[0].CreatedAt = Now().Unix()
+	tickets[0].LatencyMap = map[string]int{"us-west-1": 90, "us-east-1": 80}
+	tickets[0].SortedLatency = []models.Region{{Region: "us-east-1", Latency: 80}, {Region: "us-west-1", Latency: 90}}
+	tickets[1].CreatedAt = Now().Add(-time.Second * 2).Unix() // should match with this one
+	tickets[1].LatencyMap = map[string]int{"us-west-1": 99, "us-east-1": 100}
+	tickets[1].SortedLatency = []models.Region{{Region: "us-east-1", Latency: 90}, {Region: "us-west-1", Latency: 99}}
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, channel)
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, matchedSessions, session, "matched session should contain the session")
+	assert.NotContains(t, matchedTickets, tickets[0], "matched tickets should not contain first ticket because first ticket is newer")
+	assert.False(t, containsTicket(session, &tickets[0]), "matched session should not contain first ticket because first ticket is newer")
+	assert.Contains(t, matchedTickets, tickets[1], "matched tickets should contain the second ticket")
+	assert.True(t, containsTicket(session, &tickets[1]), "matched session should contain the second ticket")
+	assert.Equal(t, matchedTickets[0].LatencyMap["us-west-1"], 99, "matched ticket should contain the second ticket with latency 99")
+}
+
+func TestMatchSession_JoinTicket_Success(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_JoinTicket_Success", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("test-pool", 1, []int{1})
+	tickets := generateRequestNoMMR("test-pool", 1, 1)
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       1,
+			MaxNumber:       4,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 4,
+		},
+	}
+
+	updatedSessions, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, updatedSessions, session, "matched session should contain the session")
+	assert.NotContains(t, matchedSessions, session, "matched session should contain the session")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.True(t, containsTicket(session, &tickets[0]), "matched session should contain the ticket")
+}
+
+func TestMatchSession_JoinTicket_SuccessWithUniqueRuleset(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_JoinTicket_SuccessWithUniqueRuleset", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	uniqueRuleSet := utils.GenerateUUID() // "pokedex"
+	uniqueRuleSet1 := utils.GenerateUUID()
+	uniqueRuleSet2 := utils.GenerateUUID()
+	session := generateSession("test-pool", 1, []int{1})
+	session.PartyAttributes = map[string]interface{}{
+		uniqueRuleSet: uniqueRuleSet1, // "pikachu",
+	}
+
+	tickets := generateRequestNoMMR("test-pool", 2, 1)
+	tickets[0].PartyAttributes = map[string]interface{}{
+		uniqueRuleSet: uniqueRuleSet2, //"charizard",
+	}
+	tickets[1].PartyAttributes = map[string]interface{}{
+		uniqueRuleSet: uniqueRuleSet2, //"charizard",
+	}
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	enableRebalance := true
+
+	ruleset := models.RuleSet{
+		AutoBackfill:    true,
+		RebalanceEnable: &enableRebalance,
+		MatchOptions: models.MatchOptionRule{
+			Options: []models.MatchOption{
+				{
+					Name: uniqueRuleSet,
+					Type: "unique",
+				},
+			},
+		},
+
+		AllianceRule: models.AllianceRule{
+			MinNumber:       1,
+			MaxNumber:       4,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 4,
+		},
+	}
+
+	updatedSessions, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	for _, data := range updatedSessions {
+		assert.ElementsMatch(t, []interface{}{uniqueRuleSet1, uniqueRuleSet2}, data.PartyAttributes[uniqueRuleSet])
+	}
+
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, updatedSessions, session, "matched session should contain the session")
+	assert.NotContains(t, matchedSessions, session, "matched session should contain the session")
+	ticketIndex := -1
+	for i := range matchedTickets {
+		for j := range tickets {
+			if tickets[j].PartyID == matchedTickets[i].PartyID {
+				ticketIndex = j
+				break
+			}
+		}
+	}
+	assert.Contains(t, matchedTickets, tickets[ticketIndex], "matched tickets should contain the ticket")
+	assert.True(t, containsTicket(session, &tickets[ticketIndex]), "matched session should contain the ticket")
+}
+
+func TestMatchSession_JoinTicket_SuccessWithUniqueRulesetWith3Input(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_JoinTicket_SuccessWithUniqueRuleset", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	uniqueRuleSet := utils.GenerateUUID() //"pokedex"
+	uniqueRuleSet1 := "uniqueRuleSet1"
+	uniqueRuleSet2 := "uniqueRuleSet2"
+	uniqueRuleSet3 := "uniqueRuleSet3"
+	session := generateSession("test-pool", 1, []int{1})
+	session.PartyAttributes = map[string]interface{}{
+		uniqueRuleSet: uniqueRuleSet1, // "pikachu",
+	}
+
+	tickets := generateRequestNoMMR("test-pool", 3, 1)
+	createdAt := tickets[0].CreatedAt
+	tickets[0].PartyAttributes = map[string]interface{}{
+		uniqueRuleSet: uniqueRuleSet2, //"charizard",
+	}
+	tickets[1].PartyAttributes = map[string]interface{}{
+		uniqueRuleSet: uniqueRuleSet2, // "charizard",
+	}
+	tickets[1].CreatedAt = createdAt + 1
+	tickets[2].PartyAttributes = map[string]interface{}{
+		uniqueRuleSet: uniqueRuleSet3, //"eevee",
+	}
+	tickets[2].CreatedAt = createdAt + 2
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	enablerRebalance := true
+
+	ruleset := models.RuleSet{
+		AutoBackfill:    true,
+		RebalanceEnable: &enablerRebalance,
+		MatchOptions: models.MatchOptionRule{
+			Options: []models.MatchOption{
+				{
+					Name: uniqueRuleSet,
+					Type: "unique",
+				},
+			},
+		},
+
+		AllianceRule: models.AllianceRule{
+			MinNumber:       1,
+			MaxNumber:       4,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 4,
+		},
+	}
+
+	updatedSessions, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	for _, data := range updatedSessions {
+		assert.ElementsMatch(t, []interface{}{uniqueRuleSet1, uniqueRuleSet2, uniqueRuleSet3}, data.PartyAttributes[uniqueRuleSet])
+	}
+
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, updatedSessions, session, "matched session should contain the session")
+	assert.NotContains(t, matchedSessions, session, "matched session should contain the session")
+	ticketIndex := -1
+	for i := range matchedTickets {
+		for j := range tickets {
+			if tickets[j].PartyID == matchedTickets[i].PartyID {
+				ticketIndex = j
+				break
+			}
+		}
+	}
+	assert.Contains(t, matchedTickets, tickets[ticketIndex], "matched tickets should contain the ticket")
+	assert.True(t, containsTicket(session, &tickets[ticketIndex]), "matched session should contain the ticket")
+	assert.True(t, containsTicket(session, &tickets[2]), "matched session should contain the ticket")
+}
+
+// TestMatchSession_BlockedPlayerCannotMatch has a session of 1 player (a), generate match requests with 1 player (b), b block a, b cannot join the session
+func TestMatchSession_BlockedPlayerCannotMatch(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_BlockedPlayerCannotMatch", "")
+	defer scope.Finish()
+
+	channelName := "test:" + utils.GenerateUUID()
+	matchmaker := NewMatchmaker()
+	session := generateSession(channelName, 1, []int{1})
+	tickets := generateRequest(channelName, 1, 1)
+
+	// set blocked
+	tickets[0].PartyAttributes[models.AttributeBlocked] = []interface{}{"", session.MatchingAllies[0].MatchingParties[0].PartyMembers[0].UserID}
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       1,
+			MaxNumber:       1,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	updatedSessions, fullSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	require.NoError(t, err)
+	require.NotContains(t, updatedSessions, session)
+	require.NotContains(t, fullSessions, session)
+	require.NotContains(t, matchedTickets, tickets[0])
+	require.False(t, containsTicket(session, &tickets[0]))
+
+	require.Len(t, updatedSessions, 0)
+	require.Len(t, session.GetMemberUserIDs(), 1)
+}
+
+// TestMatchSession_BlockedPlayerCanMatchOnDifferentTeam has a session of 1 player (a), generate match requests with 1 player (b), b block a, both player should able to be match but in different team
+func TestMatchSession_BlockedPlayerCanMatchOnDifferentTeam(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_BlockedPlayerCanMatchOnDifferentTeam", "")
+	defer scope.Finish()
+
+	channelName := "test:" + utils.GenerateUUID()
+	matchmaker := NewMatchmaker()
+	session := generateSession(channelName, 1, []int{1})
+	tickets := generateRequest(channelName, 1, 1)
+
+	// set blocked
+	tickets[0].PartyAttributes[models.AttributeBlocked] = []interface{}{"", session.MatchingAllies[0].MatchingParties[0].PartyMembers[0].UserID}
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       1,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+
+		BlockedPlayerOption: models.BlockedPlayerCanMatchOnDifferentTeam,
+	}
+
+	updatedSessions, fullSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	require.NoError(t, err)
+	require.Contains(t, updatedSessions, session)
+	require.NotContains(t, fullSessions, session)
+	require.Contains(t, matchedTickets, tickets[0])
+	require.True(t, containsTicket(session, &tickets[0]))
+
+	require.Len(t, updatedSessions, 1)
+	require.Len(t, updatedSessions[0].MatchingAllies, 2)
+	require.Len(t, updatedSessions[0].MatchingAllies[0].GetMemberUserIDs(), 1)
+	require.Len(t, updatedSessions[0].MatchingAllies[1].GetMemberUserIDs(), 1)
+}
+
+// TestMatchSession_BlockedPlayerCanMatchOnDifferentTeam_Case2 has a session of 1 player (a), generate match requests with 2 players (b,c), b block c, c block a. They can match but respect block
+func TestMatchSession_BlockedPlayerCanMatchOnDifferentTeam_Case2(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_BlockedPlayerCanMatchOnDifferentTeam_Case2", "")
+	defer scope.Finish()
+
+	channelName := "test:" + utils.GenerateUUID()
+	matchmaker := NewMatchmaker()
+	session := generateSession(channelName, 1, []int{1})
+	tickets := generateRequest(channelName, 2, 1)
+
+	// set blocked
+	tickets[0].PartyAttributes[models.AttributeBlocked] = []interface{}{"", tickets[1].PartyMembers[0].UserID}
+	tickets[1].PartyAttributes[models.AttributeBlocked] = []interface{}{"", session.MatchingAllies[0].MatchingParties[0].PartyMembers[0].UserID}
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+
+		BlockedPlayerOption: models.BlockedPlayerCanMatchOnDifferentTeam,
+	}
+
+	updatedSessions, fullSessions, _, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	require.NoError(t, err)
+	require.Contains(t, updatedSessions, session)
+	require.NotContains(t, fullSessions, session)
+
+	// team/ally combinations must match one of these:
+	expectedTeamCombinations := [][]string{
+		// player[1] should be alone and always alone
+		{tickets[1].PartyMembers[0].UserID},
+
+		// OR player[0] and session's player together
+		{tickets[0].PartyMembers[0].UserID, session.MatchingAllies[0].MatchingParties[0].PartyMembers[0].UserID},
+		// OR player[0] alone
+		{tickets[0].PartyMembers[0].UserID},
+		// OR session's player alone
+		{session.MatchingAllies[0].MatchingParties[0].PartyMembers[0].UserID},
+	}
+
+	for _, updatedSession := range updatedSessions {
+		for _, ally := range updatedSession.MatchingAllies {
+			var match bool
+			for _, expectedTeamCombination := range expectedTeamCombinations {
+				if utils.HasSameElement(ally.GetMemberUserIDs(), expectedTeamCombination) {
+					match = true
+					break
+				}
+			}
+			if !match {
+				require.Equal(t, expectedTeamCombinations, ally.GetMemberUserIDs(), "team combinations should match one of the expectedTeamCombinations")
+			}
+		}
+	}
+}
+
+// TestMatchSession_BlockedPlayerCanMatchOnDifferentTeam_Case3 has a session of 1 player (a), generate match requests with 1 player (b), b block a, b cannot join session because ruleset only have 1 ally
+func TestMatchSession_BlockedPlayerCanMatchOnDifferentTeam_Case3(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_BlockedPlayerCanMatchOnDifferentTeam_Case3", "")
+	defer scope.Finish()
+
+	channelName := "test:" + utils.GenerateUUID()
+	matchmaker := NewMatchmaker()
+	session := generateSession(channelName, 1, []int{1})
+	tickets := generateRequest(channelName, 1, 1)
+
+	// set blocked
+	tickets[0].PartyAttributes[models.AttributeBlocked] = []interface{}{"", session.MatchingAllies[0].MatchingParties[0].PartyMembers[0].UserID}
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       1,
+			MaxNumber:       1,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+
+		BlockedPlayerOption: models.BlockedPlayerCanMatchOnDifferentTeam,
+	}
+
+	updatedSessions, fullSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	require.NoError(t, err)
+	require.NotContains(t, updatedSessions, session)
+	require.NotContains(t, fullSessions, session)
+	require.NotContains(t, matchedTickets, tickets[0])
+	require.False(t, containsTicket(session, &tickets[0]))
+
+	require.Len(t, updatedSessions, 0)
+	require.Len(t, session.GetMemberUserIDs(), 1)
+}
+
+// TestMatchSession_BlockedPlayerCanMatch has a session of 1 player (a), generate match requests with 1 player (b), b block a, both player should able to be match in the same team
+func TestMatchSession_BlockedPlayerCanMatch(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_BlockedPlayerCanMatch", "")
+	defer scope.Finish()
+
+	channelName := "test:" + utils.GenerateUUID()
+	matchmaker := NewMatchmaker()
+	session := generateSession(channelName, 1, []int{1})
+	tickets := generateRequest(channelName, 1, 1)
+
+	// set blocked
+	tickets[0].PartyAttributes[models.AttributeBlocked] = []interface{}{"", session.MatchingAllies[0].MatchingParties[0].PartyMembers[0].UserID}
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       1,
+			MaxNumber:       1,
+			PlayerMinNumber: 2,
+			PlayerMaxNumber: 2,
+		},
+
+		BlockedPlayerOption: models.BlockedPlayerCanMatch,
+	}
+
+	updatedSessions, fullSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	require.NoError(t, err)
+	require.NotContains(t, updatedSessions, session)
+	require.Contains(t, fullSessions, session)
+	require.Contains(t, matchedTickets, tickets[0])
+	require.True(t, containsTicket(session, &tickets[0]))
+
+	require.Len(t, fullSessions, 1)
+	require.Len(t, fullSessions[0].GetMemberUserIDs(), 2)
+	require.Len(t, fullSessions[0].MatchingAllies[0].GetMemberUserIDs(), 2)
+}
+
+func TestMatchSession_Asymmetric(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_Asymmetric", "")
+	t.Cleanup(func() { scope.Finish() })
+
+	channelName := "test:" + utils.GenerateUUID()
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 4,
+			Combination: models.Combination{
+				HasCombination: true,
+				Alliances: [][]models.Role{
+					{
+						{Name: "monster", Min: 1, Max: 1},
+					},
+					{
+						{Name: "hunter", Min: 1, Max: 2},
+						{Name: "villager", Min: 1, Max: 3},
+					},
+				},
+			},
+		},
+		MatchingRule: []models.MatchingRule{{
+			Attribute: "mmr",
+			Criteria:  distanceCriteria,
+			Reference: 10_000,
+		}},
+	}
+	channel := models.Channel{
+		Ruleset: ruleset,
+	}
+	matchmaker := NewMatchmaker()
+
+	// case 1: we have 1 session which have "monster" role and 2 requests which doesn't have role attribute - return no satisfied tickets
+	{
+		session := generateSession(channelName, 1, []int{1})
+		session.MatchingAllies[0].MatchingParties[0].PartyMembers[0].SetRole("monster")
+
+		tickets := generateRequest(channelName, 2, 1)
+
+		updatedSessions, fullSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, []*models.MatchmakingResult{session}, channel)
+		require.NoError(t, err)
+		require.Len(t, updatedSessions, 0)
+		require.Len(t, fullSessions, 0)
+		require.Len(t, matchedTickets, 0)
+	}
+
+	// case 2: we have 1 session which have "monster" role and 2 requests which have only "monster role" - return no satisfied tickets
+	{
+		session := generateSession(channelName, 1, []int{1})
+		session.MatchingAllies[0].MatchingParties[0].PartyMembers[0].SetRole("monster")
+
+		tickets := generateRequest(channelName, 2, 1)
+		for i, ticket := range tickets {
+			for j := range ticket.PartyMembers {
+				tickets[i].PartyMembers[j].SetRole("monster")
+			}
+		}
+
+		updatedSessions, fullSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, []*models.MatchmakingResult{session}, channel)
+		require.NoError(t, err)
+		require.Len(t, updatedSessions, 0)
+		require.Len(t, fullSessions, 0)
+		require.Len(t, matchedTickets, 0)
+	}
+
+	// case 3: we have 1 session which have "monster" role and 2 requests which have all roles - each player assigned to 1 role
+	{
+		session := generateSession(channelName, 1, []int{1})
+		session.MatchingAllies[0].MatchingParties[0].PartyMembers[0].SetRole("monster")
+
+		tickets := generateRequest(channelName, 2, 1)
+		for i, ticket := range tickets {
+			for j := range ticket.PartyMembers {
+				setRole(&tickets[i].PartyMembers[j], []string{"monster", "hunter", "villager"}...)
+			}
+		}
+
+		updatedSessions, fullSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, []*models.MatchmakingResult{session}, channel)
+		require.NoError(t, err)
+		require.Len(t, updatedSessions, 1)
+		require.Len(t, fullSessions, 0)
+		require.Len(t, matchedTickets, 2)
+
+		for i, ally := range session.MatchingAllies {
+			memberRoles := make([]string, 0)
+			for _, party := range ally.MatchingParties {
+				for _, member := range party.PartyMembers {
+					require.Len(t, member.GetRole(), 1)
+					memberRole := member.GetRole()[0]
+					require.NotEmpty(t, memberRole)
+					memberRoles = append(memberRoles, memberRole)
+				}
+			}
+			if i == 0 {
+				require.Equal(t, 1, ally.CountPlayer())
+				require.ElementsMatch(t, []string{"monster"}, memberRoles)
+			}
+			if i == 1 {
+				require.Equal(t, 2, ally.CountPlayer())
+				require.ElementsMatch(t, []string{"hunter", "villager"}, memberRoles)
+			}
+		}
+	}
+
+	// case 4: we have 1 session which have "monster" role and 4 requests which have all roles - each player assigned to 1 role and the role is distributed evenly
+	{
+		session := generateSession(channelName, 1, []int{1})
+		session.MatchingAllies[0].MatchingParties[0].PartyMembers[0].SetRole("monster")
+
+		tickets := generateRequest(channelName, 4, 1)
+		for i, ticket := range tickets {
+			for j := range ticket.PartyMembers {
+				setRole(&tickets[i].PartyMembers[j], []string{"monster", "hunter", "villager"}...)
+			}
+		}
+
+		updatedSessions, fullSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, []*models.MatchmakingResult{session}, channel)
+		require.NoError(t, err)
+		require.Len(t, updatedSessions, 1)
+		require.Len(t, fullSessions, 0)
+		require.Len(t, matchedTickets, 4)
+
+		for i, ally := range session.MatchingAllies {
+			mapRoles := make(map[string]int)
+			for _, party := range ally.MatchingParties {
+				for _, member := range party.PartyMembers {
+					require.Len(t, member.GetRole(), 1)
+					memberRole := member.GetRole()[0]
+					require.NotEmpty(t, memberRole)
+					mapRoles[memberRole]++
+				}
+			}
+			if i == 0 {
+				require.Equal(t, 1, ally.CountPlayer())
+				require.Equal(t, 1, mapRoles["monster"])
+			}
+			if i == 1 {
+				require.Equal(t, 4, ally.CountPlayer())
+				require.Equal(t, 2, mapRoles["hunter"])
+				require.Equal(t, 2, mapRoles["villager"])
+			}
+		}
+	}
+}
+
+func TestMatchSession_RoleBased_Backfill(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_RoleBased_Backfill", "")
+	t.Cleanup(func() { scope.Finish() })
+
+	channelName := "test:" + utils.GenerateUUID()
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       3,
+			PlayerMinNumber: 3,
+			PlayerMaxNumber: 4,
+			Combination: models.Combination{
+				HasCombination: true,
+				Alliances: [][]models.Role{
+					{
+						{Name: "dps", Min: 1, Max: 3},
+						{Name: "tank", Min: 1, Max: 2},
+						{Name: "healer", Min: 1, Max: 2},
+					},
+				},
+			},
+		},
+	}
+	channel := models.Channel{
+		Ruleset: ruleset,
+	}
+	matchmaker := NewMatchmaker()
+
+	{
+		session := generateSession(channelName, 2, []int{3, 3})
+		session.MatchingAllies[0].MatchingParties[0].PartyMembers[0].SetRole("dps")
+		session.MatchingAllies[0].MatchingParties[0].PartyMembers[1].SetRole("tank")
+		session.MatchingAllies[0].MatchingParties[0].PartyMembers[2].SetRole("healer")
+		session.MatchingAllies[1].MatchingParties[0].PartyMembers[0].SetRole("dps")
+		session.MatchingAllies[1].MatchingParties[0].PartyMembers[1].SetRole("tank")
+		session.MatchingAllies[1].MatchingParties[0].PartyMembers[2].SetRole("healer")
+
+		tickets := generateRequest(channelName, 1, 1)
+		setRole(&tickets[0].PartyMembers[0], "dps")
+
+		updatedSessions, fullSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, []*models.MatchmakingResult{session}, channel)
+		require.NoError(t, err)
+		require.Len(t, updatedSessions, 1)
+		require.Len(t, fullSessions, 0)
+		require.Len(t, matchedTickets, 1)
+
+		for allyIndex, ally := range session.MatchingAllies {
+			mapRoles := make(map[string]int)
+			for _, party := range ally.MatchingParties {
+				for _, member := range party.PartyMembers {
+					require.Len(t, member.GetRole(), 1)
+					memberRole := member.GetRole()[0]
+					require.NotEmpty(t, memberRole)
+					mapRoles[memberRole]++
+				}
+			}
+			if allyIndex == 0 {
+				require.Equal(t, 4, ally.CountPlayer())
+				require.Equal(t, 2, mapRoles["dps"])
+				require.Equal(t, 1, mapRoles["tank"])
+				require.Equal(t, 1, mapRoles["healer"])
+			}
+			if allyIndex == 1 {
+				require.Equal(t, 3, ally.CountPlayer())
+				require.Equal(t, 1, mapRoles["dps"])
+				require.Equal(t, 1, mapRoles["tank"])
+				require.Equal(t, 1, mapRoles["healer"])
+			}
+		}
+	}
+}
+
+func TestMatchSession_DuplicateUserID(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_DuplicateUserID", "")
+	defer scope.Finish()
+
+	userIDA := "userA"
+
+	channelName := "test:" + utils.GenerateUUID()
+	matchmaker := NewMatchmaker()
+	session := generateSession(channelName, 2, []int{3, 1})
+	tickets := generateRequest(channelName, 2, 1)
+	tickets[0].PartyMembers[0].UserID = userIDA
+	tickets[1].PartyMembers[0].UserID = userIDA
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       1,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 5,
+		},
+
+		AutoBackfill:                    true,
+		RebalanceEnable:                 models.TRUE(),
+		RegionLatencyInitialRangeMs:     25,
+		RegionExpansionRateMs:           10000,
+		RegionExpansionRangeMs:          50,
+		RegionLatencyMaxMs:              500,
+		MatchOptionsReferredForBackfill: false,
+	}
+
+	updatedSessions, _, _, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	require.NoError(t, err)
+	require.Contains(t, updatedSessions, session)
+
+	require.Len(t, updatedSessions, 1)
+	require.Len(t, updatedSessions[0].GetMemberUserIDs(), 5)
+	require.Len(t, updatedSessions[0].MatchingAllies, 2)
+	require.Len(t, updatedSessions[0].MatchingAllies[0].GetMemberUserIDs(), 3)
+	require.Len(t, updatedSessions[0].MatchingAllies[1].GetMemberUserIDs(), 2)
+
+	var countUserA int
+	for _, ally := range updatedSessions[0].MatchingAllies {
+		for _, party := range ally.MatchingParties {
+			for _, member := range party.PartyMembers {
+				if member.UserID == "userA" {
+					countUserA++
+				}
+			}
+		}
+	}
+	require.Equal(t, countUserA, 1)
+}
+
+func TestMatchSession_MatchOptionAnyAllCommon(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_AddToAlly_Success", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmakerWithConfigOverride(func(cfg *config.Config) {
+		cfg.FlagAnyMatchOptionAllCommon = true
+	})
+
+	session := generateSession("pveheist", 1, []int{2})
+	tickets := generateRequest("pveheist", 3, 1)
+
+	session.PartyAttributes = map[string]interface{}{
+		"MapAssetNameTest": []interface{}{"ArmoredTransport", "JewelryStore"},
+	}
+
+	tickets[0].PartyAttributes = map[string]interface{}{
+		"MapAssetNameTest": []interface{}{"BranchBank", "ArmoredTransport", "JewelryStore", "CargoDock"},
+	}
+	tickets[1].PartyAttributes = map[string]interface{}{
+		"MapAssetNameTest": []interface{}{"CargoDock"},
+	}
+	tickets[2].PartyAttributes = map[string]interface{}{
+		"MapAssetNameTest": []interface{}{"ArmoredTransport"},
+	}
+
+	for i := range tickets {
+		tickets[i].PartyID = fmt.Sprintf("party%d", i)
+	}
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       1,
+			MaxNumber:       1,
+			PlayerMinNumber: 2,
+			PlayerMaxNumber: 4,
+		},
+		MatchOptions: models.MatchOptionRule{
+			Options: []models.MatchOption{
+				{Name: "MapAssetNameTest", Type: "any"},
+			},
+		},
+	}
+
+	_, satisfiedSession, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, matchedTickets, tickets[0], "matched tickets should contain the ticket")
+	assert.Contains(t, matchedTickets, tickets[2], "matched tickets should contain the ticket")
+	assert.NotContains(t, matchedTickets, tickets[1], "matched tickets should contain the ticket")
+	require.Contains(t, satisfiedSession, session, "matched session should contain the session")
+	assert.Equal(t, []interface{}{"ArmoredTransport"}, satisfiedSession[0].PartyAttributes["MapAssetNameTest"])
+}
+
+func TestMatchSession_CrossPlatformAny(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_CrossPlatformAny", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmakerWithConfigOverride(func(cfg *config.Config) {
+		cfg.FlagAnyMatchOptionAllCommon = true
+	})
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       1,
+			MaxNumber:       1,
+			PlayerMinNumber: 2,
+			PlayerMaxNumber: 10,
+		},
+		MatchOptions: models.MatchOptionRule{
+			Options: []models.MatchOption{
+				{Name: models.AttributeCrossPlatform, Type: "any"},
+			},
+		},
+	}
+
+	matchpool := "cross"
+
+	type testattributes struct {
+		currentPlatforms []any
+		wantPlatforms    []any
+	}
+
+	type testargs struct {
+		session testattributes
+		reqs    []testattributes
+	}
+	type testwant struct {
+		match        bool
+		matchedIndex []int
+		attr         testattributes
+	}
+	type testcase struct {
+		name string
+		args testargs
+		want testwant
+	}
+
+	tests := []testcase{
+		{
+			name: "case1",
+			args: testargs{
+				session: testattributes{
+					currentPlatforms: []any{"steam", "ps5"},
+					wantPlatforms:    []any{"steam", "ps5", "xbox"},
+				},
+				reqs: []testattributes{
+					{
+						currentPlatforms: []any{"steam"},
+						wantPlatforms:    []any{"steam", "ps5", "xbox"},
+					},
+					{
+						currentPlatforms: []any{"xbox"},
+						wantPlatforms:    []any{"steam", "ps5", "xbox"},
+					},
+					{
+						currentPlatforms: []any{"xbox"},
+						wantPlatforms:    []any{"xbox"},
+					},
+					{
+						currentPlatforms: []any{"ps5"},
+						wantPlatforms:    []any{"steam", "ps5", "xbox"},
+					},
+					{
+						currentPlatforms: []any{"ps5"},
+						wantPlatforms:    []any{"ps5"},
+					},
+				},
+			},
+			want: testwant{
+				match:        true,
+				matchedIndex: []int{0, 1, 3},
+				attr: testattributes{
+					currentPlatforms: []any{"steam", "ps5", "xbox"},
+					wantPlatforms:    []any{"steam", "ps5", "xbox"},
+				},
+			},
+		},
+		{
+			name: "case2",
+			args: testargs{
+				session: testattributes{
+					currentPlatforms: []any{"steam"},
+					wantPlatforms:    []any{"steam", "ps5", "xbox"},
+				},
+				reqs: []testattributes{
+					{
+						currentPlatforms: []any{"steam"},
+						wantPlatforms:    []any{"steam"},
+					},
+					{
+						currentPlatforms: []any{"xbox"},
+						wantPlatforms:    []any{"steam", "ps5", "xbox"},
+					},
+					{
+						currentPlatforms: []any{"ps5"},
+						wantPlatforms:    []any{"steam", "ps5", "xbox"},
+					},
+					{
+						currentPlatforms: []any{"ps5"},
+						wantPlatforms:    []any{"ps5"},
+					},
+				},
+			},
+			want: testwant{
+				match:        true,
+				matchedIndex: []int{0},
+				attr: testattributes{
+					currentPlatforms: []any{"steam"},
+					wantPlatforms:    []any{"steam"},
+				},
+			},
+		},
+		{
+			name: "case3",
+			args: testargs{
+				session: testattributes{
+					currentPlatforms: []any{"steam"},
+					wantPlatforms:    []any{"steam", "ps5", "xbox"},
+				},
+				reqs: []testattributes{
+					{
+						currentPlatforms: []any{"xbox"},
+						wantPlatforms:    []any{"xbox", "ps5"},
+					},
+					{
+						currentPlatforms: []any{"xbox"},
+						wantPlatforms:    []any{"steam", "ps5", "xbox"},
+					},
+					{
+						currentPlatforms: []any{"steam"},
+						wantPlatforms:    []any{"steam"},
+					},
+					{
+						currentPlatforms: []any{"xbox"},
+						wantPlatforms:    []any{"steam", "ps5", "xbox"},
+					},
+					{
+						currentPlatforms: []any{"ps5"},
+						wantPlatforms:    []any{"ps5"},
+					},
+				},
+			},
+			want: testwant{
+				match:        true,
+				matchedIndex: []int{1, 3},
+				attr: testattributes{
+					currentPlatforms: []any{"steam", "xbox"},
+					wantPlatforms:    []any{"steam", "ps5", "xbox"},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := generateSession(matchpool, 1, []int{2})
+			tickets := generateRequest(matchpool, len(tt.args.reqs), 1)
+
+			session.PartyAttributes = map[string]interface{}{
+				models.AttributeCurrentPlatform: tt.args.session.currentPlatforms,
+				models.AttributeCrossPlatform:   tt.args.session.wantPlatforms,
+			}
+			for i, ally := range session.MatchingAllies {
+				for j := range ally.MatchingParties {
+					session.MatchingAllies[i].MatchingParties[j].PartyID = fmt.Sprintf("sparty%d-%d", i, j)
+				}
+			}
+
+			createdAt := tickets[0].CreatedAt
+			for i := range tickets {
+				tickets[i].PartyAttributes = map[string]interface{}{
+					models.AttributeCurrentPlatform: tt.args.reqs[i].currentPlatforms,
+					models.AttributeCrossPlatform:   tt.args.reqs[i].wantPlatforms,
+				}
+				tickets[i].PartyID = fmt.Sprintf("party%d", i)
+				tickets[i].CreatedAt = createdAt + int64(i)
+			}
+
+			var sessions []*models.MatchmakingResult
+			sessions = append(sessions, session)
+
+			updatedSessions, satisfiedSessions, _, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+			sessionsResult := satisfiedSessions
+			if len(sessionsResult) == 0 {
+				sessionsResult = updatedSessions
+			}
+
+			assert.NoError(t, err, "finding session should have no error")
+
+			if !tt.want.match {
+				require.Len(t, sessionsResult, 0)
+				return
+			}
+
+			require.Len(t, sessionsResult, 1)
+
+			matchedPartyIDs := make([]string, 0)
+			for _, ally := range sessionsResult[0].MatchingAllies {
+				for _, party := range ally.MatchingParties {
+					matchedPartyIDs = append(matchedPartyIDs, party.PartyID)
+				}
+			}
+
+			for i := range tickets {
+				if slices.Contains(tt.want.matchedIndex, i) {
+					assert.Contains(t, matchedPartyIDs, tickets[i].PartyID)
+				} else {
+					assert.NotContains(t, matchedPartyIDs, tickets[i].PartyID)
+				}
+			}
+
+			if tt.want.attr.currentPlatforms != nil {
+				assert.ElementsMatch(t, tt.want.attr.currentPlatforms, sessionsResult[0].PartyAttributes[models.AttributeCurrentPlatform])
+			}
+			if tt.want.attr.wantPlatforms != nil {
+				assert.ElementsMatch(t, tt.want.attr.wantPlatforms, sessionsResult[0].PartyAttributes[models.AttributeCrossPlatform])
+			}
+		})
+	}
+}
+
+func TestMatchSession_BackfillRebalance(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_BackfillRebalance", "")
+	defer scope.Finish()
+
+	channelName := "test:" + utils.GenerateUUID()
+	matchmaker := NewMatchmaker()
+	session := generateSession(channelName, 2, []int{3, 1})
+	tickets := generateRequest(channelName, 2, 1)
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 5,
+			PlayerMaxNumber: 5,
+		},
+	}
+
+	// should be allow to rebalance ignoring minimal aliance requirement
+	updatedSessions, fullSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	require.NoError(t, err)
+	require.Empty(t, fullSessions)
+	require.Contains(t, matchedTickets, tickets[0])
+	require.Contains(t, matchedTickets, tickets[1])
+
+	require.Equal(t, updatedSessions[0].MatchingAllies[0].CountPlayer(), updatedSessions[0].MatchingAllies[1].CountPlayer())
+}
+
+func TestMatchSession_WithExcludedSessions_Success(t *testing.T) {
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_WithExcludedSessions_Success", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.MatchSessionID = utils.GenerateUUID()
+	tickets := generateRequest("2v2", 2, 1)
+	assert.Len(t, tickets, 2, "should generate 2 tickets")
+
+	// first ticket excludes the only available session
+	excludedSessionID := session.MatchSessionID
+	tickets[0].ExcludedSessions = []string{excludedSessionID}
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	_, matchedSessions, matchedTickets, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, tickets[0].ExcludedSessions, session.MatchSessionID, "ticket should contain the session")
+	assert.Contains(t, matchedSessions, session, "matched session should contain the session")
+	assert.Contains(t, matchedTickets, tickets[1], "matched tickets should contain the 2nd ticket")
+	assert.False(t, containsTicket(session, &tickets[0]), "matched session should contain the 1st ticket")
+}
+
+func TestMatchSession_WithEmptyExcludedSessions_Success(t *testing.T) {
+	t.Parallel()
+	scope := envelope.NewRootScope(context.Background(), "TestMatchSession_WithExcludedSessions_Success", "")
+	defer scope.Finish()
+
+	matchmaker := NewMatchmaker()
+
+	session := generateSession("2v2", 2, []int{2, 1})
+	session.MatchSessionID = ""
+	tickets := generateRequest("2v2", 2, 1)
+	assert.Len(t, tickets, 2, "should generate 2 tickets")
+
+	// first ticket excludes the only available session
+	excludedSessionID := session.MatchSessionID
+	tickets[0].ExcludedSessions = []string{excludedSessionID}
+
+	var sessions []*models.MatchmakingResult
+	sessions = append(sessions, session)
+
+	ruleset := models.RuleSet{
+		AllianceRule: models.AllianceRule{
+			MinNumber:       2,
+			MaxNumber:       2,
+			PlayerMinNumber: 1,
+			PlayerMaxNumber: 2,
+		},
+	}
+
+	_, matchedSessions, _, err := matchmaker.MatchSessions(scope, "", "", tickets, sessions, models.Channel{Ruleset: ruleset})
+	assert.NoError(t, err, "finding session should have no error")
+	assert.Contains(t, tickets[0].ExcludedSessions, session.MatchSessionID, "ticket should contain the session")
+	assert.Contains(t, matchedSessions, session, "matched session should contain the session")
+}

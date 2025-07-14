@@ -1,0 +1,9 @@
+services:
+  test:
+    build:
+      context: .
+      dockerfile: build.Dockerfile
+    environment:
+      - LOG_LEVEL=debug
+    extra_hosts:
+      - host.docker.internal:host-gateway

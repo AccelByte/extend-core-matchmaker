@@ -1,0 +1,5 @@
+Dockerfile
+Makefile
+pkg/pb/*.pb.go
+.cache/
+.env
