@@ -110,7 +110,7 @@ func generateRequestWithMMR(channelName string, requestCount, memberPerAllyCount
 		request := models.MatchmakingRequest{
 			// note:
 			// using ULID to ensure party IDs are sorted according to the creation order,
-			// since Bleve will sort party IDs that has the same score
+			// since it will sort party IDs that has the same score
 			PartyID:      generateUlid(t),
 			Channel:      channelName,
 			CreatedAt:    time.Now().Add(-time.Duration(rand.Intn(100000)) * time.Millisecond).UTC().Unix(), //nolint:gosec
@@ -153,7 +153,7 @@ func generateRequestWithoutMMR(channelName string, requestCount, memberPerAllyCo
 		request := models.MatchmakingRequest{
 			// note:
 			// using ULID to ensure party IDs are sorted according to the creation order,
-			// since Bleve will sort party IDs that has the same score
+			// since it will sort party IDs that has the same score
 			PartyID:      ulid.MustNew(ulid.Timestamp(t), entropy).String(),
 			Channel:      channelName,
 			CreatedAt:    time.Now().Add(-time.Duration(rand.Intn(100000)) * time.Millisecond).UTC().Unix(), //nolint:gosec
@@ -191,7 +191,7 @@ func generateRequestWithMMRAndRole(channelName string, memberCount, mmr int, rol
 	request := models.MatchmakingRequest{
 		// note:
 		// using ULID to ensure party IDs are sorted according to the creation order,
-		// since Bleve will sort party IDs that has the same score
+		// since it will sort party IDs that has the same score
 		Priority:     priority,
 		PartyID:      generateUlid(timeNow),
 		Channel:      channelName,

@@ -23,6 +23,8 @@ const (
 
 	ServerNameTag  = "ags.matchmakingv2.server_name"
 	TeamMembersTag = "ags.matchmakingv2.team_members"
+
+	abTraceIdLogField = "abTraceID"
 )
 
 func ChildScopeFromRemoteScope(ctx context.Context, name string) *Scope {
@@ -65,6 +67,11 @@ type Scope struct {
 	TraceID string
 	span    oteltrace.Span
 	Log     *logrus.Entry
+}
+
+// SetLogger allows for setting a different logger than the default std logger. This is mostly useful for testing.
+func (s *Scope) SetLogger(logger *logrus.Logger) {
+	s.Log = logger.WithField(abTraceIdLogField, s.TraceID)
 }
 
 // Finish finishes current scope

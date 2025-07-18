@@ -106,10 +106,8 @@ func (mm *MatchMaker) MatchPlayers(rootScope *envelope.Scope, namespace string, 
 
 	var (
 		matchPlayersTimer          elapsedTimer
-		bleveIndexingTimer         elapsedTimer
 		applyFlexingTimer          elapsedTimer
 		regionLoopTimer            elapsedTimer
-		runBleveQueryTimer         elapsedTimer
 		findMatchingAllyTimer      elapsedTimer
 		filterOptionsTimer         elapsedTimer
 		prepareMatchingAlliesTimer elapsedTimer
@@ -126,10 +124,8 @@ func (mm *MatchMaker) MatchPlayers(rootScope *envelope.Scope, namespace string, 
 
 		elapsedTimeMaps := map[string]time.Duration{
 			"totalMatchPlayers":      matchPlayersTimer.elapsed(),
-			"bleveIndexing":          bleveIndexingTimer.elapsed(),
 			"applyFlexing":           applyFlexingTimer.totalElapsed(),
 			"regionLoop":             regionLoopTimer.totalElapsed(),
-			"runBleveQuery":          runBleveQueryTimer.totalElapsed(),
 			"findMatchingAlly":       findMatchingAllyTimer.totalElapsed(),
 			"filterOptions":          filterOptionsTimer.totalElapsed(),
 			"prepareMatchingAllies":  prepareMatchingAlliesTimer.totalElapsed(),
@@ -262,11 +258,6 @@ regionloop:
 		}
 		mmRequests = append(mmRequests, *req)
 		playerCount += len(req.PartyMembers)
-
-		/* // [BLEVE]
-		for _, matchResult := range result.Hits {
-			req = getMatchmakingRequest(matchResult.ID, matchmakingRequests)
-		*/
 
 		for resultIndex := range result {
 			// [MANUALSEARCH]
@@ -769,10 +760,6 @@ regionloop:
 			}
 		}
 
-		/* // [BLEVE] remove bleve index
-		removed := matchmakingRequests[removedID]
-		*/
-
 		switch removedID {
 		case 0:
 			matchmakingRequests = matchmakingRequests[removedID+1:]
@@ -781,22 +768,6 @@ regionloop:
 		default:
 			matchmakingRequests = append(matchmakingRequests[:removedID], matchmakingRequests[removedID+1:]...)
 		}
-		// if !needRequestRotation {
-
-		/* // [BLEVE] remove bleve index
-		err = index.Delete(removed.PartyID)
-		if err != nil {
-			scope.Log.Error("unable to remove request from index: ", err)
-		}
-		*/
-
-		// } else {
-		// 	// in case the pivot comes from the re-matchmaking ticket
-		// 	// set first ticket created time to last created time to
-		// 	// prevent the same request become pivot request again
-		// 	removed.FirstTicketCreatedAt = removed.CreatedAt
-		// 	matchmakingRequests = append(matchmakingRequests, removed)
-		// }
 
 		if len(matchmakingRequests) > 0 && reqLen >= allianceComposition.MinTeam {
 			goto pivotMatching

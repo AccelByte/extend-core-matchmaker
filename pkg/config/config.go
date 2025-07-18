@@ -11,4 +11,6 @@ type Config struct {
 	PrioritizeLargerParties        bool `env:"PRIORITIZE_LARGER_PARTIES"          envDefault:"false" envDocs:"prioritize larger parties during find matches"`
 	FlagAnyMatchOptionAllCommon    bool `env:"FLAG_ANY_MATCH_OPTION_ALL_COMMON"   envDefault:"true"  envDocs:"Any match option match common value for all tickets, not only by pivot ticket"`
 	CrossPlatformNoCurrentPlatform bool `env:"CROSS_PLATFORM_NO_CURRENT_PLATFORM" envDefault:"false" envDocs:"If true current_platform attribute won't be added when creating match ticket. Can be overridden on namespace config."`
+
+	TicketChunkSize int `env:"TICKET_CHUNK_SIZE" envDefault:"1000" envDocs:"the amount of tickets to chunk to match at a time"`
 }

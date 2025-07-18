@@ -5,7 +5,6 @@
 package defaultmatchmaker
 
 import (
-	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -42,9 +41,7 @@ func (mm *MatchMaker) MatchSessions(rootScope *envelope.Scope, namespace string,
 
 	var (
 		matchSessionsTimer         elapsedTimer
-		bleveIndexingTimer         elapsedTimer
 		applyFlexingTimer          elapsedTimer
-		runBleveQueryTimer         elapsedTimer
 		filterOptionsTimer         elapsedTimer
 		findMatchingAllyTimer      elapsedTimer
 		updatePartyAttributesTimer elapsedTimer
@@ -57,9 +54,7 @@ func (mm *MatchMaker) MatchSessions(rootScope *envelope.Scope, namespace string,
 
 		elapsedTimeMaps := map[string]time.Duration{
 			"totalMatchSessions":    matchSessionsTimer.elapsed(),
-			"bleveIndexing":         bleveIndexingTimer.elapsed(),
 			"applyFlexing":          applyFlexingTimer.totalElapsed(),
-			"runBleveQuery":         runBleveQueryTimer.totalElapsed(),
 			"filterOptions":         filterOptionsTimer.totalElapsed(),
 			"findMatchingAlly":      findMatchingAllyTimer.totalElapsed(),
 			"updatePartyAttributes": updatePartyAttributesTimer.totalElapsed(),
@@ -93,7 +88,6 @@ func (mm *MatchMaker) MatchSessions(rootScope *envelope.Scope, namespace string,
 	if mm.cfg != nil && mm.cfg.PrioritizeLargerParties {
 		sortDESC(tickets)
 	}
-	bleveIndexingTimer.end()
 
 	// for each session
 allsession:
@@ -126,12 +120,6 @@ allsession:
 		}
 
 	tickethitloop:
-		// // [BLEVE]
-		// for _, hit := range result.Hits {
-		// 	candidateTicket := getMatchmakingRequest(hit.ID, tickets)
-		// 	if candidateTicket == nil || len(candidateTicket.PartyMembers) == 0 {
-		// 		continue
-		// 	}
 
 		// [MANUALSEARCH]
 		for resultIndex := range result {
@@ -164,8 +152,6 @@ allsession:
 					}
 				}
 				// skip ticket if somehow its not match
-				// check bleve data and query if below log appears
-				// because this should be filtered in bleve query
 				if !isRegionMatch {
 					scope.Log.WithField("match_id", session.MatchID).
 						WithField("channel", session.Channel).
@@ -569,12 +555,6 @@ allsession:
 				// append ticket to satisfiedTickets
 				satisfiedTickets = append(satisfiedTickets, *candidateTicket)
 
-				// // [BLEVE]
-				// // remove ticket from bleve index
-				// err = index.Delete(candidateTicket.PartyID)
-				// if err != nil {
-				// 	scope.Log.Error("unable to remove ticket from index: ", err)
-				// }
 				tickets = removeMatchmakingRequest(candidateTicket.PartyID, tickets)
 
 				full := false
@@ -742,62 +722,4 @@ func updateBlockedPlayerInSession(session *models.MatchmakingResult) {
 		session.PartyAttributes = make(map[string]interface{})
 	}
 	session.PartyAttributes[models.AttributeBlocked] = blockedPlayers
-}
-
-// regionValueForBleve transform region value, it replace all the dash into underscore.
-// Please note, region should be in format "ap_southeast_1" instead of "ap-southeast-1"
-// the result will different when we use dash
-func regionValueForBleve(region string) string {
-	return strings.ReplaceAll(region, "-", "_")
-}
-
-func generateQueryStringBySession(ruleset models.RuleSet, session models.MatchmakingResult) (query string) {
-	query += generateDistanceQuery(ruleset, session.PartyAttributes)
-	query += generateSubGameModeQuery(ruleset, session.PartyAttributes)
-	query += generateMatchOptionsAndPartyAttributesQuery(ruleset, session.PartyAttributes)
-
-	// match based on server_name
-	if session.ServerName != "" {
-		query += fmt.Sprintf(`+%s.server_name:"%v" `, partyAttributesKey, session.ServerName)
-	} else {
-		// match all server_name when the attribute is empty
-		query += fmt.Sprintf(`-%s.server_name:* `, partyAttributesKey)
-	}
-
-	// match based on client_version
-	if session.ClientVersion != "" {
-		query += fmt.Sprintf(`+%s.client_version:"%v" `, partyAttributesKey, session.ClientVersion)
-	} else {
-		// match all client_version when the attribute is empty
-		query += fmt.Sprintf(`-%s.client_version:* `, partyAttributesKey)
-	}
-
-	// match based on region
-	if strings.TrimSpace(session.Region) != "" {
-		// Please note, region should be in format "ap_southeast_1" instead of "ap-southeast-1"
-		// the result will different when we use dash
-		query += fmt.Sprintf("+%s.%s:>=0 ", latencyMapKey, regionValueForBleve(session.Region))
-	}
-
-	var excludedPartyIDs, excludedUserIDs []string
-	for _, ally := range session.MatchingAllies {
-		for _, party := range ally.MatchingParties {
-			excludedPartyIDs = append(excludedPartyIDs, party.PartyID)
-			for _, member := range party.PartyMembers {
-				excludedUserIDs = append(excludedUserIDs, member.UserID)
-			}
-		}
-	}
-
-	// avoid match with same party ID
-	for _, partyID := range excludedPartyIDs {
-		query += fmt.Sprintf("-party_id:%s ", partyID)
-	}
-
-	// avoid match with same user ID
-	for _, userID := range excludedUserIDs {
-		query += fmt.Sprintf("-party_members.user_id:%s ", userID)
-	}
-
-	return query
 }

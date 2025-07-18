@@ -13,11 +13,10 @@ import (
 
 	"github.com/AccelByte/extend-core-matchmaker/pkg/common"
 	"github.com/AccelByte/extend-core-matchmaker/pkg/config"
+	"github.com/AccelByte/extend-core-matchmaker/pkg/envelope"
 	"github.com/AccelByte/extend-core-matchmaker/pkg/metrics"
 	"github.com/AccelByte/extend-core-matchmaker/pkg/models"
 	"github.com/AccelByte/extend-core-matchmaker/pkg/utils"
-
-	"github.com/AccelByte/extend-core-matchmaker/pkg/envelope"
 
 	"github.com/AccelByte/extend-core-matchmaker/pkg/matchmaker"
 	player "github.com/AccelByte/extend-core-matchmaker/pkg/playerdata"
@@ -37,7 +36,7 @@ type defaultMatchMaker struct {
 // New returns a defaultMatchMaker of the MatchLogic interface
 func New(cfg *config.Config, metric metrics.MatchmakingMetrics) matchmaker.MatchLogic {
 	return defaultMatchMaker{
-		indexedTicketLength: 10000,
+		indexedTicketLength: cfg.TicketChunkSize,
 		metrics:             metric,
 		mm:                  NewMatchMaker(cfg, metric),
 	}
@@ -100,7 +99,7 @@ func (b defaultMatchMaker) RulesFromJSON(rootScope *envelope.Scope, jsonRules st
 }
 
 func (b defaultMatchMaker) MakeMatches(rootScope *envelope.Scope, ticketProvider matchmaker.TicketProvider, matchRules interface{}) <-chan matchmaker.Match {
-	scope := rootScope.NewChildScope("bleveMatchmaker.BackfillMatches")
+	scope := rootScope.NewChildScope("defaultMatchMaker.BackfillMatches")
 	defer scope.Finish()
 
 	results := make(chan matchmaker.Match)
@@ -136,120 +135,62 @@ func (b defaultMatchMaker) MakeMatches(rootScope *envelope.Scope, ticketProvider
 	return results
 }
 
-func (b defaultMatchMaker) BackfillMatches(scope *envelope.Scope, ticketProvider matchmaker.TicketProvider, matchRules interface{}) <-chan matchmaker.BackfillProposal {
+func (b defaultMatchMaker) BackfillMatches(rootScope *envelope.Scope, ticketProvider matchmaker.TicketProvider, matchRules interface{}) <-chan matchmaker.BackfillProposal {
+	scope := rootScope.NewChildScope("defaultMatchMaker.BackfillMatches")
+	defer scope.Finish()
+
 	results := make(chan matchmaker.BackfillProposal)
-	ctx := scope.Ctx
-
-	scope.Log.WithField("method", "defaultMatchMaker.BackfillMatches")
-	scope.Log.Info("start")
-
-	rule, ok := matchRules.(models.RuleSet)
+	ruleset, ok := matchRules.(models.RuleSet)
 	if !ok {
-		scope.Log.Errorf("unexpected game rule type %T", matchRules)
-
-		return nil
+		scope.Log.Errorf("invalid type for matchRules")
+		close(results)
+		return results
 	}
 
 	go func() {
-		defer func() {
-			close(results)
-			scope.Log.Info("end backfill")
-		}()
-		var unmatchedTickets []matchmaker.Ticket
-		var unmatchedBackfillTickets []matchmaker.BackfillTicket
-		nextTicket := ticketProvider.GetTickets()
-		nextBackfillTicket := ticketProvider.GetBackfillTickets()
-
-		for {
-			if nextTicket == nil && nextBackfillTicket == nil {
-				return
-			}
-
-			select {
-			case ticket, ok := <-nextTicket:
-				if !ok {
-					scope.Log.Info("no more match tickets")
-					nextTicket = nil
-
-					continue
-				}
-				scope.Log.WithField("ticketId", ticket.TicketID).Infof("got a match ticket")
-				unmatchedTickets, unmatchedBackfillTickets = buildBackfillMatch(scope, &ticket, nil, unmatchedTickets, unmatchedBackfillTickets, rule, results)
-			case backfillTicket, ok := <-nextBackfillTicket:
-				if !ok {
-					scope.Log.Info("no more backfill tickets")
-					nextBackfillTicket = nil
-
-					continue
-				}
-				scope.Log.WithField("ticketId", backfillTicket.TicketID).Infof("got a backfill ticket")
-				unmatchedTickets, unmatchedBackfillTickets = buildBackfillMatch(scope, nil, &backfillTicket, unmatchedTickets, unmatchedBackfillTickets, rule, results)
-			case <-ctx.Done():
-				scope.Log.Info("CTX Done triggered")
-
-				return
-			}
+		var wg sync.WaitGroup
+		channel := models.Channel{
+			Ruleset: ruleset,
 		}
-	}()
 
+		backfillTicketChannel := ticketProvider.GetBackfillTickets()
+		ticketChannel := ticketProvider.GetTickets()
+		for requests, sessions, tickets := getNextNBackfillRequests(scope, backfillTicketChannel, ticketChannel, b.indexedTicketLength, ruleset); len(sessions) > 0; requests, sessions, tickets = getNextNBackfillRequests(scope, backfillTicketChannel, ticketChannel, b.indexedTicketLength, ruleset) {
+			wg.Add(1)
+
+			requestValues := requests
+			sessionValues := sessions
+			go b.runBackfilling(scope, tickets, requestValues, sessionValues, channel, results, &wg)
+		}
+		wg.Wait()
+		close(results)
+	}()
 	return results
 }
 
-// buildBackfillMatch is responsible for building matches from the slice of match tickets and feeding them to the match channel
-func buildBackfillMatch(scope *envelope.Scope, newTicket *matchmaker.Ticket, newBackfillTicket *matchmaker.BackfillTicket, unmatchedTickets []matchmaker.Ticket, unmatchedBackfillTickets []matchmaker.BackfillTicket, rule models.RuleSet, results chan matchmaker.BackfillProposal) ([]matchmaker.Ticket, []matchmaker.BackfillTicket) {
-	//log := scope.Log.WithField("method", "MATCHMAKER.buildBackfillMatch")
+func (b defaultMatchMaker) runBackfilling(
+	rootScope *envelope.Scope, tickets []matchmaker.Ticket, requests []models.MatchmakingRequest,
+	sessions []*models.MatchmakingResult, channel models.Channel, results chan matchmaker.BackfillProposal,
+	wg *sync.WaitGroup,
+) {
+	scope := rootScope.NewChildScope("runBackfilling")
+	defer scope.Finish()
+	defer wg.Done()
+	namespace, matchPool := getNamespaceMatchPool(tickets)
 
-	if newTicket != nil {
-		unmatchedTickets = append(unmatchedTickets, *newTicket)
+	b.updateMatchAttempt(scope, requests)
+	updatedSessions, satisfiedSessions, satisfiedTickets, err := b.mm.MatchSessions(scope, namespace, matchPool, requests, sessions, channel)
+	if err != nil {
+		scope.Log.Errorf("error backfilling matches: %s", err)
 	}
-	if newBackfillTicket != nil {
-		unmatchedBackfillTickets = append(unmatchedBackfillTickets, *newBackfillTicket)
+
+	for _, result := range updatedSessions {
+		results <- fromMatchResultToBackfillProposal(result, satisfiedTickets, tickets)
 	}
-
-	//log.WithField("numBackfill", len(unmatchedBackfillTickets)).
-	//	WithField("numTicket", len(unmatchedTickets)).
-	//	Info("buildBackfillMatch")
-	//
-	//if len(unmatchedBackfillTickets) > 0 && len(unmatchedTickets) > 0 {
-	//	log.Info("I have enough tickets to backfill!")
-	//	var i int
-	//	var backfillTicket matchmaker.BackfillTicket
-	//	for i, backfillTicket = range unmatchedBackfillTickets {
-	//		ticket := unmatchedTickets[0]
-	//		unmatchedTickets = unmatchedTickets[1:]
-	//
-	//		proposedTeam := backfillTicket.PartialMatch.Teams
-	//		proposedTeam = append(proposedTeam, matchmaker.Team{
-	//			UserIDs: pie_.Map(ticket.Players, playerdata.ToID),
-	//			Parties: matchfunction.PlayerDataToParties(ticket.Players),
-	//		})
-	//
-	//		log.Info("Send backfill proposal!")
-	//		results <- matchmaker.BackfillProposal{
-	//			BackfillTicketID: backfillTicket.TicketID,
-	//			CreatedAt:        time.Time{},
-	//			AddedTickets:     []matchmaker.Ticket{ticket},
-	//			ProposedTeams:    proposedTeam,
-	//			ProposalID:       "",
-	//			MatchPool:        backfillTicket.MatchPool,
-	//			MatchSessionID:   backfillTicket.MatchSessionID,
-	//		}
-	//
-	//		if len(unmatchedTickets) == 0 {
-	//			if i+1 < len(unmatchedBackfillTickets) {
-	//				unmatchedBackfillTickets = unmatchedBackfillTickets[i+1:]
-	//			} else {
-	//				unmatchedBackfillTickets = nil
-	//			}
-	//
-	//			break
-	//		}
-	//	}
-	//} else {
-	//	log.Info("not enough tickets to build a match")
-	//}
-
-	return unmatchedTickets, unmatchedBackfillTickets
+	for _, result := range satisfiedSessions {
+		results <- fromMatchResultToBackfillProposal(result, satisfiedTickets, tickets)
+	}
+	b.deleteMatchAttempt(scope, requests, append(updatedSessions, satisfiedSessions...))
 }
 
 func getNextNRequests(ticketChannel chan matchmaker.Ticket, maxTicketCount int, ruleset models.RuleSet) ([]models.MatchmakingRequest, []matchmaker.Ticket) {
@@ -266,6 +207,54 @@ func getNextNRequests(ticketChannel chan matchmaker.Ticket, maxTicketCount int, 
 	requests = pie.Map(indexedTickets, toMatchRequest(ruleset))
 
 	return requests, indexedTickets
+}
+
+func getNextNBackfillRequests(rootScope *envelope.Scope, backfillTicketChannel chan matchmaker.BackfillTicket,
+	ticketChannel chan matchmaker.Ticket, maxTicketCount int, ruleSet models.RuleSet) ([]models.MatchmakingRequest, []*models.MatchmakingResult, []matchmaker.Ticket) {
+
+	scope := rootScope.NewChildScope("getNextNBackfillRequests")
+	defer scope.Finish()
+
+	var indexedTickets []matchmaker.Ticket
+	var requests []models.MatchmakingRequest
+	var indexedBackfillTickets []matchmaker.BackfillTicket
+	var sessions []*models.MatchmakingResult
+	wg := sync.WaitGroup{}
+
+	wg.Add(1)
+	go func(wg *sync.WaitGroup) {
+		for i := 0; i < maxTicketCount; i++ {
+			ticket, ok := <-ticketChannel
+			if !ok {
+				break
+			}
+
+			request := toMatchRequest(ruleSet)(ticket)
+			if request.IsNewSessionOnly() {
+				continue
+			}
+
+			indexedTickets = append(indexedTickets, ticket)
+			requests = append(requests, request)
+		}
+		wg.Done()
+	}(&wg)
+
+	wg.Add(1)
+	go func(wg *sync.WaitGroup) {
+		for i := 0; i < maxTicketCount; i++ {
+			backfillTicket, ok := <-backfillTicketChannel
+			if !ok {
+				break
+			}
+			indexedBackfillTickets = append(indexedBackfillTickets, backfillTicket)
+		}
+		sessions = pie.Map(indexedBackfillTickets, fromBackfillTicketsToMatchResult(scope, ruleSet))
+		wg.Done()
+	}(&wg)
+	wg.Wait()
+
+	return requests, sessions, indexedTickets
 }
 
 func toMatchRequest(ruleset models.RuleSet) func(ticket matchmaker.Ticket) models.MatchmakingRequest {
@@ -629,7 +618,7 @@ func fromMatchResultToBackfillProposal(result *models.MatchmakingResult, satisfi
 func (b defaultMatchMaker) addToPartiesRegionInMatchQueueMetrics(rootScope *envelope.Scope, requests []models.MatchmakingRequest,
 	sourceTickets []matchmaker.Ticket, channel models.Channel,
 ) {
-	scope := rootScope.NewChildScope("bleveMatchmaker.addToPartiesRegionInMatchQueueMetrics")
+	scope := rootScope.NewChildScope("defaultMatchMaker.addToPartiesRegionInMatchQueueMetrics")
 	defer scope.Finish()
 
 	namespace, matchPool := getNamespaceMatchPool(sourceTickets)
@@ -707,9 +696,12 @@ func (b defaultMatchMaker) updateMatchAttempt(rootScope *envelope.Scope, request
 		if requests[i].PartyAttributes == nil {
 			requests[i].PartyAttributes = make(map[string]interface{})
 		} else {
-			matchAttempt, _ = utils.GetMapValueAs[float64](requests[i].PartyAttributes, models.AttributeMatchAttempt)
+			var ok bool
+			matchAttempt, ok = utils.GetMapValueAs[float64](requests[i].PartyAttributes, models.AttributeMatchAttempt)
+			if ok {
+				matchAttempt++
+			}
 		}
-		matchAttempt++
 		requests[i].PartyAttributes[models.AttributeMatchAttempt] = matchAttempt
 		requests[i].Priority = int(matchAttempt)
 	}
