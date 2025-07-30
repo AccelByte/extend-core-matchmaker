@@ -440,9 +440,8 @@ func generateInMemoryTickets(amountOfTickets int) []matchmaker.Ticket {
 func newMatchLogic() matchmaker.MatchLogic {
 	c := config.Config{}
 	c.TicketChunkSize = 10
-	metric := testsetup.NewMetrics()
 
-	return New(&c, metric)
+	return New(&c)
 }
 
 func TestToTeamsConvertion(t *testing.T) {

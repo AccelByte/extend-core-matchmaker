@@ -14,7 +14,6 @@ import (
 	"github.com/AccelByte/extend-core-matchmaker/pkg/common"
 	"github.com/AccelByte/extend-core-matchmaker/pkg/config"
 	"github.com/AccelByte/extend-core-matchmaker/pkg/envelope"
-	"github.com/AccelByte/extend-core-matchmaker/pkg/metrics"
 	"github.com/AccelByte/extend-core-matchmaker/pkg/models"
 	"github.com/AccelByte/extend-core-matchmaker/pkg/utils"
 
@@ -28,17 +27,15 @@ const externalPartyID = "external"
 
 type defaultMatchMaker struct {
 	unmatchedTickets    []matchmaker.Ticket
-	metrics             metrics.MatchmakingMetrics
 	mm                  matchmaker.Matchmaker
 	indexedTicketLength int
 }
 
 // New returns a defaultMatchMaker of the MatchLogic interface
-func New(cfg *config.Config, metric metrics.MatchmakingMetrics) matchmaker.MatchLogic {
+func New(cfg *config.Config) matchmaker.MatchLogic {
 	return defaultMatchMaker{
 		indexedTicketLength: cfg.TicketChunkSize,
-		metrics:             metric,
-		mm:                  NewMatchMaker(cfg, metric),
+		mm:                  NewMatchMaker(cfg),
 	}
 }
 
@@ -356,18 +353,6 @@ func fromMatchResult(result *models.MatchmakingResult, sourceTickets []matchmake
 	if result.ClientVersion != "" {
 		result.PartyAttributes[models.AttributeClientVersion] = result.ClientVersion
 	}
-	// [role-based] update ticketAttributes["role"] with the assigned role
-	if ruleset.IsRoleBased() {
-		roleAttr := make(map[string]interface{})
-		for _, ally := range result.MatchingAllies {
-			for _, party := range ally.MatchingParties {
-				for _, member := range party.PartyMembers {
-					roleAttr[member.UserID] = member.ExtraAttributes[models.ROLE]
-				}
-			}
-		}
-		result.PartyAttributes[models.ROLE] = roleAttr
-	}
 
 	return matchmaker.Match{
 		Tickets:          matchingTickets,
@@ -389,15 +374,7 @@ func isMatchFull(tickets []matchmaker.Ticket, result *models.MatchmakingResult, 
 	})[0]
 
 	var maxPlayerCount int
-	if ruleset.IsUseSubGamemode() {
-		for _, name := range result.GetSubGameModeNames() {
-			subGameMode := ruleset.SubGameModes[name]
-			sgmMaxPlayerCount := subGameMode.AllianceRule.MaxNumber * subGameMode.AllianceRule.PlayerMaxNumber
-			if sgmMaxPlayerCount > maxPlayerCount {
-				maxPlayerCount = sgmMaxPlayerCount
-			}
-		}
-	} else {
+	{
 		currentRule, _ := applyAllianceFlexingRules(ruleset, oldestTicket.CreatedAt)
 		maxPlayerCount = currentRule.AllianceRule.MaxNumber * currentRule.AllianceRule.PlayerMaxNumber
 	}
@@ -621,8 +598,6 @@ func (b defaultMatchMaker) addToPartiesRegionInMatchQueueMetrics(rootScope *enve
 	scope := rootScope.NewChildScope("defaultMatchMaker.addToPartiesRegionInMatchQueueMetrics")
 	defer scope.Finish()
 
-	namespace, matchPool := getNamespaceMatchPool(sourceTickets)
-
 	remainingRegionStats := make(map[string]map[int]int)
 	for _, request := range requests {
 		if len(request.SortedLatency) > 0 {
@@ -641,13 +616,6 @@ func (b defaultMatchMaker) addToPartiesRegionInMatchQueueMetrics(rootScope *enve
 			}
 			stats[request.CountPlayer()]++
 			remainingRegionStats["empty-region"] = stats
-		}
-	}
-
-	for region, remainingRegionStat := range remainingRegionStats {
-		for numPlayers := 1; numPlayers <= channel.Ruleset.AllianceRule.PlayerMaxNumber; numPlayers++ {
-			numParties := remainingRegionStat[numPlayers]
-			b.metrics.PartiesRegionInMatchQueue(namespace, matchPool, region, numPlayers, numParties)
 		}
 	}
 }
@@ -687,6 +655,7 @@ func (b defaultMatchMaker) runMatchMaking(rootScope *envelope.Scope, requests []
 	b.deleteMatchAttempt(scope, requests, matchResults)
 }
 
+// TODO: remove
 func (b defaultMatchMaker) updateMatchAttempt(rootScope *envelope.Scope, requests []models.MatchmakingRequest) {
 	scope := rootScope.NewChildScope("updateMatchAttempt")
 	defer scope.Finish()

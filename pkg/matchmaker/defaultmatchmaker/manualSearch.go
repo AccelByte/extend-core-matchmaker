@@ -11,7 +11,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/AccelByte/extend-core-matchmaker/pkg/constants"
 	"github.com/AccelByte/extend-core-matchmaker/pkg/envelope"
 	"github.com/AccelByte/extend-core-matchmaker/pkg/models"
 
@@ -29,8 +28,8 @@ func (mm *MatchMaker) SearchMatchTickets(originalRuleSet, activeRuleSet *models.
 	distances := getFilterByDistance(activeRuleSet, pivot.PartyAttributes)
 	subGameModes := getFilterBySubGameMode(activeRuleSet, pivot.PartyAttributes)
 	options := getFilterByMatchOption(activeRuleSet, pivot.PartyAttributes)
-	anyCrossPlay := getFilterByCrossPlay(activeRuleSet, pivot.PartyAttributes, mm.useCurrentPlatform)
-	partyAttributes := getFilterByPartyAttribute(activeRuleSet, pivot.PartyAttributes, mm.useCurrentPlatform)
+	anyCrossPlay := getFilterByCrossPlay(activeRuleSet, pivot.PartyAttributes)
+	partyAttributes := getFilterByPartyAttribute(activeRuleSet, pivot.PartyAttributes)
 	additionCriterias := getFilterByAdditionalCriteria(pivot)
 	pivotUserID := pivot.GetMapUserIDs()
 
@@ -146,7 +145,7 @@ ticketLoop:
 	return results
 }
 
-func (mm *MatchMaker) SearchMatchTicketsBySession(rootScope *envelope.Scope, originalRuleSet, activeRuleSet *models.RuleSet, channel *models.Channel, session models.MatchmakingResult, tickets []models.MatchmakingRequest) ([]models.MatchmakingRequest, map[string]string) {
+func (mm *MatchMaker) SearchMatchTicketsBySession(rootScope *envelope.Scope, originalRuleSet, activeRuleSet *models.RuleSet, channel *models.Channel, session models.MatchmakingResult, tickets []models.MatchmakingRequest) []models.MatchmakingRequest {
 	scope := rootScope.NewChildScope("ManualSearch.SearchMatchTicketsBySession")
 	defer scope.Finish()
 
@@ -154,8 +153,8 @@ func (mm *MatchMaker) SearchMatchTicketsBySession(rootScope *envelope.Scope, ori
 	distances := getFilterByDistance(activeRuleSet, session.PartyAttributes)
 	subGameModes := getFilterBySubGameMode(activeRuleSet, session.PartyAttributes)
 	options := getFilterByMatchOption(activeRuleSet, session.PartyAttributes)
-	anyCrossPlay := getFilterByCrossPlay(activeRuleSet, session.PartyAttributes, mm.useCurrentPlatform)
-	partyAttributes := getFilterByPartyAttribute(activeRuleSet, session.PartyAttributes, mm.useCurrentPlatform)
+	anyCrossPlay := getFilterByCrossPlay(activeRuleSet, session.PartyAttributes)
+	partyAttributes := getFilterByPartyAttribute(activeRuleSet, session.PartyAttributes)
 	sessionPartyIDs := session.GetMapPartyIDs()
 	sessionUserID := session.GetMapUserIDs()
 
@@ -175,7 +174,6 @@ func (mm *MatchMaker) SearchMatchTicketsBySession(rootScope *envelope.Scope, ori
 
 	// filter tickets
 	matchTickets := make([]matchTicket, 0)
-	unBackfilledReasons := make(map[string]string, len(tickets))
 ticketLoop:
 	for ticketIndex := range tickets {
 		ticket := &tickets[ticketIndex]
@@ -196,7 +194,6 @@ ticketLoop:
 			}
 		}
 		if !allowMatch {
-			unBackfilledReasons[ticket.PartyID] = constants.UnbackfillReasonSessionExcluded
 			continue
 		}
 
@@ -212,21 +209,18 @@ ticketLoop:
 			filteredRegions := filterRegionByStep(ticket, channel)
 			regionIdx := slices.IndexFunc(filteredRegions, func(item models.Region) bool { return item.Region == session.Region })
 			if regionIdx < 0 {
-				unBackfilledReasons[ticket.PartyID] = constants.UnbackfillReasonRegionIsNotMatch
 				continue
 			}
 		}
 
 		isMatch, score := matchByDistance(ticket, originalRuleSet, distances)
 		if !isMatch {
-			unBackfilledReasons[ticket.PartyID] = constants.UnbackfillReasonAttributeDistanceNotSatisfied
 			continue
 		}
 		totalScore += score
 
 		isMatch, score = matchBySubGameMode(ticket, subGameModes)
 		if !isMatch {
-			unBackfilledReasons[ticket.PartyID] = constants.UnbackfillReasonSubGameModeNotSatisfied
 			continue
 		}
 		totalScore += score
@@ -238,7 +232,6 @@ ticketLoop:
 		}
 
 		if ok, fns := matchByMatchOption(ticket, options, mm.isMatchAnyCommon); !ok {
-			unBackfilledReasons[ticket.PartyID] = constants.UnbackfillReasonMatchOptionNotSatisfied
 			continue
 		} else {
 			for _, fn := range fns {
@@ -251,7 +244,6 @@ ticketLoop:
 		}
 
 		if ok, fn := matchByBlockedPlayers(ticket, userIDSet, blockSet, channel.Ruleset.BlockedPlayerOption); !ok {
-			unBackfilledReasons[ticket.PartyID] = constants.UnbackfillReasonBlockedPlayerExist
 			continue
 		} else if fn != nil {
 			finalizeFunctions = append(finalizeFunctions, fn)
@@ -259,14 +251,12 @@ ticketLoop:
 
 		if session.ServerName != "" {
 			if session.ServerName != ticket.PartyAttributes[models.AttributeServerName] {
-				unBackfilledReasons[ticket.PartyID] = constants.UnbackfillReasonServerNameNotSatisfied
 				continue
 			}
 		}
 
 		if session.ClientVersion != "" {
 			if session.ClientVersion != ticket.PartyAttributes[models.AttributeClientVersion] {
-				unBackfilledReasons[ticket.PartyID] = constants.UnbackfillReasonClientVersionNotSatisfied
 				continue
 			}
 		}
@@ -289,7 +279,7 @@ ticketLoop:
 		results[i] = v.ticket
 	}
 
-	return results, unBackfilledReasons
+	return results
 }
 
 func sortMatchTickets(matchTickets []matchTicket, sessionRegion string) {
@@ -594,10 +584,7 @@ type crossPlayAttributes struct {
 	currentPlatforms map[string]struct{}
 }
 
-func getFilterByCrossPlay(activeRuleSet *models.RuleSet, partyAttributes map[string]interface{}, useCurrentPlatform bool) *crossPlayAttributes {
-	if !useCurrentPlatform {
-		return nil
-	}
+func getFilterByCrossPlay(activeRuleSet *models.RuleSet, partyAttributes map[string]interface{}) *crossPlayAttributes {
 
 	anyCrossPlatform := false
 	for _, v := range activeRuleSet.MatchOptions.Options {
@@ -702,7 +689,7 @@ type partyAttribute struct {
 	value interface{}
 }
 
-func getFilterByPartyAttribute(activeRuleSet *models.RuleSet, partyAttributes map[string]interface{}, useCurrentPlatform bool) []partyAttribute {
+func getFilterByPartyAttribute(activeRuleSet *models.RuleSet, partyAttributes map[string]interface{}) []partyAttribute {
 	result := make([]partyAttribute, 0)
 	optionsMap := make(map[string]struct{})
 	for _, option := range activeRuleSet.MatchOptions.Options {
@@ -731,10 +718,6 @@ func getFilterByPartyAttribute(activeRuleSet *models.RuleSet, partyAttributes ma
 				})
 			}
 		default:
-			if key == models.AttributeCurrentPlatform && useCurrentPlatform {
-				// when using current_platform, the attribute will be ignored, will be checked on matchByAnyCrossPlay
-				continue
-			}
 			result = append(result, partyAttribute{
 				key:   key,
 				value: value,

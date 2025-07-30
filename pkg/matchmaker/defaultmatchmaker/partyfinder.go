@@ -21,15 +21,6 @@ type PartyFinder interface {
 // 1) newRoleBasedCombo() to find party for role-based with role combination (combo role-based),
 // 2) newRoleBasedUnique() to find party for role-based without role combination (unique role-based),
 // 3) newNormal() to find party for non role-based
-func GetPartyFinder(hasCombination bool, roles []models.Role, playerMinNumber, playerMaxNumber int, current []models.MatchmakingRequest) (pf PartyFinder) {
-	if hasCombination {
-		if len(roles) > 0 {
-			pf = newRoleBasedCombo(playerMinNumber, playerMaxNumber, roles, current)
-		} else {
-			pf = newRoleBasedUnique(playerMinNumber, playerMaxNumber, current)
-		}
-	} else {
-		pf = newNormal(playerMinNumber, playerMaxNumber, current)
-	}
-	return pf
+func GetPartyFinder(playerMinNumber, playerMaxNumber int, current []models.MatchmakingRequest) (pf PartyFinder) {
+	return newNormal(playerMinNumber, playerMaxNumber, current)
 }

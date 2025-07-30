@@ -153,3 +153,29 @@ func skipFilterCandidateRegion(ticket *models.MatchmakingRequest, channel *model
 	ticketAge := time.Since(time.Unix(ticket.CreatedAt, 0))
 	return disableDuration < ticketAge
 }
+
+func RemoveEmptyMatchingParties(allies []models.MatchingAlly) []models.MatchingAlly {
+	for i := 0; i < len(allies); i++ {
+		ally := allies[i]
+		if len(ally.MatchingParties) == 0 || (len(ally.MatchingParties) == 1 && len(ally.MatchingParties[0].PartyMembers) == 0) {
+			allies[i] = allies[len(allies)-1]
+			allies = allies[:len(allies)-1]
+			i--
+		}
+	}
+	return allies
+}
+
+func DetermineAllianceComposition(ruleSet models.RuleSet) models.AllianceComposition {
+	minTeam := ruleSet.AllianceRule.MinNumber
+	maxTeam := ruleSet.AllianceRule.MaxNumber
+	maxPlayer := ruleSet.AllianceRule.PlayerMaxNumber
+	minPlayer := ruleSet.AllianceRule.PlayerMinNumber
+
+	return models.AllianceComposition{
+		MinTeam:   minTeam,
+		MaxTeam:   maxTeam,
+		MaxPlayer: maxPlayer,
+		MinPlayer: minPlayer,
+	}
+}

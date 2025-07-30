@@ -469,12 +469,12 @@ func RangeBlockedPlayerUserIDs(partyAttributes map[string]interface{}) func(func
 
 // ExtraAttributes consts.
 const (
-	ROLE = "role"
+	ROLE = "role" // unsupported
 )
 
 // role-based value.
 const (
-	AnyRole = "any"
+	AnyRole = "any" // unsupported
 )
 
 // MatchmakingRequest is the request for a party to get matched
@@ -527,19 +527,6 @@ func (r MatchmakingRequest) IsNewSessionOnly() bool {
 
 func (r MatchmakingRequest) CountPlayer() int {
 	return len(r.PartyMembers)
-}
-
-func (r MatchmakingRequest) CountPlayerByRole(role string) int {
-	var count int
-	for _, m := range r.PartyMembers {
-		for _, r := range m.GetRole() {
-			if r == role {
-				count++
-				break
-			}
-		}
-	}
-	return count
 }
 
 // Avg get average float64 values of given attribute name.
@@ -932,7 +919,7 @@ type RuleSet struct {
 	FlexingRule                        []FlexingRule          `bson:"flexingRule"                            json:"flexing_rule"`
 	AllianceFlexingRule                []AllianceFlexingRule  `bson:"alliance_flexing_rule"                  json:"alliance_flexing_rule"`
 	MatchOptions                       MatchOptionRule        `bson:"match_options"                          json:"match_options"`
-	SubGameModes                       map[string]SubGameMode `bson:"sub_game_modes"                         json:"sub_game_modes"`
+	SubGameModes                       map[string]SubGameMode `bson:"sub_game_modes"                         json:"sub_game_modes"` // note: unsupported
 	RebalanceEnable                    *bool                  `json:"rebalance_enable,omitempty"`
 	RebalanceVersion                   int                    `json:"rebalance_version,omitempty"` // can be 1 or 2. Any other value will default to latest.
 	TicketObservabilityEnable          bool                   `bson:"ticket_observability_enable"            json:"ticket_observability_enable"            optional:"true"`
@@ -1082,58 +1069,12 @@ func (r RuleSet) Copy() RuleSet {
 	return ruleset
 }
 
-func (r RuleSet) IsUseSubGamemode() bool {
-	return len(r.SubGameModes) > 0
-}
-
-const (
-	RebalanceV1       = 1
-	RebalanceV2       = 2
-	RebalanceDisabled = -1 // internal use only because config has `rebalance_enable`. -1 will be ignored if used.
-)
-
-func (r RuleSet) GetRebalanceMode() int {
-	if r.RebalanceEnable == nil {
-		// default value will be true, using latest rebalancer version
-		return RebalanceV2
-	}
-	if *r.RebalanceEnable {
-		return r.RebalanceVersion
-	}
-	return RebalanceDisabled
-}
-
-func (r RuleSet) IsRoleBased() bool {
-	return r.AllianceRule.IsRoleBased()
-}
-
-func (r RuleSet) IsCrossPlatformConfigured() bool {
-	for _, option := range r.MatchOptions.Options {
-		if option.Name == AttributeCrossPlatform {
-			return option.Type != MatchOptionTypeDisable
-		}
-	}
-
-	return false
-}
-
 func (r RuleSet) BlockedPlayerAllowedToMatch() bool {
 	return r.BlockedPlayerOption == BlockedPlayerCanMatch
 }
 
 func (r RuleSet) IsSinglePlay() bool {
 	return r.AllianceRule.MinNumber == 1 && r.AllianceRule.MaxNumber == 1 && r.AllianceRule.PlayerMinNumber == 1 && r.AllianceRule.PlayerMaxNumber == 1
-}
-
-// UnbackfillReason function to get unbackfill reason value based on auto backfill configuration.
-func (r RuleSet) UnbackfillReason() string {
-	var reason string
-
-	if !r.AutoBackfill {
-		reason = constants.UnbackfillReasonAutoBackfillIsFalse
-	}
-
-	return reason
 }
 
 func (r RuleSet) GetRegionLatencyRuleWeight() float64 {
@@ -1149,10 +1090,6 @@ type AllianceRule struct {
 	PlayerMinNumber int `json:"player_min_number" valid:"range(0|2147483647)"`
 	PlayerMaxNumber int `json:"player_max_number" valid:"range(0|2147483647)"`
 	Combination     `json:"combination"`
-}
-
-func (a AllianceRule) IsRoleBased() bool {
-	return a.Combination.IsRoleBased()
 }
 
 func (reqData *AllianceRule) Validate() error {
@@ -1199,7 +1136,7 @@ func (rule AllianceRule) ValidateAllyMaxOnly(ally MatchingAlly, allyIndex int) e
 	if playerCount > rule.PlayerMaxNumber {
 		return fmt.Errorf("player count %d more than max %d", playerCount, rule.PlayerMaxNumber)
 	}
-	return rule.validateMembersBasedOnRoles(members, allyIndex, false, true)
+	return nil
 }
 
 // ValidateAlly validate an ally based on alliance rule
@@ -1220,7 +1157,7 @@ func (rule AllianceRule) ValidateAlly(ally MatchingAlly, allyIndex int) error {
 	if playerCount > rule.PlayerMaxNumber {
 		return fmt.Errorf("player count %d more than max %d", playerCount, rule.PlayerMaxNumber)
 	}
-	return rule.validateMembersBasedOnRoles(members, allyIndex, true, true)
+	return nil
 }
 
 // ValidateAllies validate allies based on alliance rule
@@ -1230,21 +1167,13 @@ func (rule AllianceRule) ValidateAllies(allies []MatchingAlly, blockedPlayerOpti
 		return fmt.Errorf("ally count %d more than max %d", len(allies), rule.MaxNumber)
 	}
 	// validate min ally count
-	if rule.IsMultiComboRoleBased() {
-		var playerCount int
-		for _, ally := range allies {
-			playerCount += ally.CountPlayer()
-		}
-		if playerCount < rule.CountMinRole() {
-			return fmt.Errorf("multi combo role based: ally count %d less than min %d", len(allies), rule.CountMinRole())
-		}
-	} else if len(allies) < rule.MinNumber {
+	if len(allies) < rule.MinNumber {
 		return fmt.Errorf("ally count %d less than min %d", len(allies), rule.MinNumber)
 	}
 	minAlly := rule.MinNumber
 	var countAllyWithMinMember int
 	// validate each ally
-	for allyIndex, ally := range allies {
+	for _, ally := range allies {
 		playerCount := ally.CountPlayer()
 		if playerCount == 0 {
 			continue
@@ -1255,9 +1184,6 @@ func (rule AllianceRule) ValidateAllies(allies []MatchingAlly, blockedPlayerOpti
 		countAllyWithMinMember++
 		if playerCount > rule.PlayerMaxNumber {
 			return fmt.Errorf("player count %d more than max %d", playerCount, rule.PlayerMaxNumber)
-		}
-		if err := rule.validateMembersBasedOnRoles(ally.GetMembers(), allyIndex, true, true); err != nil {
-			return err
 		}
 	}
 	if countAllyWithMinMember < minAlly {
@@ -1281,55 +1207,6 @@ func (rule AllianceRule) ValidateAllies(allies []MatchingAlly, blockedPlayerOpti
 				if _, exist := blockedIDs[userID]; exist {
 					return fmt.Errorf("there is blocked player as a team, player %s was blocked by other player in the team", userID)
 				}
-			}
-		}
-	}
-	return nil
-}
-
-// validateBasedOnRoles validate members based on roles from rule AllianceRule
-// please specify allyIndex to get role for multi-combo role-based (especially when it is assymetry, where each ally has different set of roles), otherwise we can set it to 0
-func (rule AllianceRule) validateMembersBasedOnRoles(members []PartyMember, allyIndex int, validateMin, validateMax bool) error {
-	if !rule.HasCombination {
-		return nil
-	}
-	requiredRoles := rule.GetRoles(allyIndex)
-	memberRoleCount := make(map[string]int, 0)
-	for _, member := range members {
-		// in matching ally, member expected to have 1 role only, which is the assigned role
-		if len(member.GetRole()) != 1 {
-			return fmt.Errorf("player %s have more or less than 1 role: %v", member.UserID, member.GetRole())
-		}
-		memberRole := member.GetRole()[0]
-		memberRoleCount[memberRole]++
-	}
-	if rule.IsUniqueRoleBased() {
-		for role, count := range memberRoleCount {
-			if count > 1 {
-				return fmt.Errorf("unique role based: role %s count %d more than 1", role, count)
-			}
-		}
-	}
-	if rule.IsComboRoleBased() {
-		mapRequiredRoles := make(map[string]struct{})
-		for _, role := range requiredRoles {
-			if validateMin && (memberRoleCount[role.Name] < role.Min) {
-				numAnyRoleToFill := role.Min - memberRoleCount[role.Name]
-				// substitute required role from any role
-				if memberRoleCount[AnyRole] >= numAnyRoleToFill {
-					memberRoleCount[AnyRole] -= numAnyRoleToFill
-					memberRoleCount[role.Name] += numAnyRoleToFill
-				} else {
-					return fmt.Errorf("combo role based: role %s count %d less than min %d with remaining any role %d", role.Name, memberRoleCount[role.Name], role.Min, memberRoleCount[AnyRole])
-				}
-			} else if validateMax && (memberRoleCount[role.Name] > role.Max) {
-				return fmt.Errorf("combo role based: role %s count %d more than max %d", role.Name, memberRoleCount[role.Name], role.Max)
-			}
-			mapRequiredRoles[role.Name] = struct{}{}
-		}
-		for memberRole := range memberRoleCount {
-			if _, ok := mapRequiredRoles[memberRole]; !ok && memberRole != AnyRole {
-				return fmt.Errorf("combo role based: role %s is not expected to be in ally %d", memberRole, allyIndex)
 			}
 		}
 	}
@@ -1611,69 +1488,6 @@ func (c Combination) Validate(maxNumber, playerMinNumber, playerMaxNumber int) e
 	return nil
 }
 
-func (c Combination) IsRoleBased() bool {
-	return c.HasCombination
-}
-
-// IsUniqueRoleBased is role based with no role combination,
-// so each player need to have unique role attribute in order to create a match,
-// currently we do not have any case for this yet.
-func (c Combination) IsUniqueRoleBased() bool {
-	if !c.HasCombination {
-		return false
-	}
-	return len(c.Alliances) == 0
-}
-
-// IsComboRoleBased is role based with role combination,
-// this can be categorized as SingleComboRoleBased or MultiComboRoleBased.
-func (c Combination) IsComboRoleBased() bool {
-	if !c.HasCombination {
-		return false
-	}
-	return len(c.Alliances) > 0
-}
-
-// IsSingleComboRoleBased is role based with only one role combination for all alliances.
-func (c Combination) IsSingleComboRoleBased() bool {
-	if !c.HasCombination {
-		return false
-	}
-	return len(c.Alliances) == 1
-}
-
-// IsMultiComboRoleBased is role based with different role combination between each ally.
-func (c Combination) IsMultiComboRoleBased() bool {
-	if !c.HasCombination {
-		return false
-	}
-	return len(c.Alliances) > 1
-}
-
-// IsAsymmetry is role based with different role combination between each ally,
-// the difference is defined by different size or same size but different role name combinations.
-func (c Combination) IsAsymmetry() bool {
-	if !c.HasCombination {
-		return false
-	}
-	if len(c.Alliances) <= 1 {
-		return false
-	}
-	for a := 0; a < len(c.Alliances); a++ {
-		if a == len(c.Alliances)-1 {
-			break
-		}
-		for b := a + 1; b < len(c.Alliances); b++ {
-			rolesA := c.Alliances[a]
-			rolesB := c.Alliances[b]
-			if isDifferent(rolesA, rolesB) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func isDifferent(rolesA, rolesB []Role) bool {
 	if len(rolesA) != len(rolesB) {
 		return true
@@ -1691,50 +1505,6 @@ func isDifferent(rolesA, rolesB []Role) bool {
 		}
 	}
 	return false
-}
-
-func (c Combination) CountMinRole() (count int) {
-	if !c.HasCombination {
-		return 0
-	}
-	for _, alliance := range c.Alliances {
-		for _, role := range alliance {
-			count += role.Min
-		}
-	}
-	return count
-}
-
-func (c Combination) CountMaxRole() (count int) {
-	if !c.HasCombination {
-		return 0
-	}
-	for _, alliance := range c.Alliances {
-		for _, role := range alliance {
-			count += role.Max
-		}
-	}
-	return count
-}
-
-// GetRoles will return role combination for the ally based on index (allyIndex),
-// UniqueRoleBased have empty combination so the index will not give any effect,
-// SingleComboRoleBased only have one combination so the index will not give any effect,
-// MultiComboRoleBased have different combination for each ally so index will defined which combination to returned.
-func (c Combination) GetRoles(allyIndex int) []Role {
-	if !c.HasCombination {
-		return nil
-	}
-	if c.IsUniqueRoleBased() {
-		return nil
-	}
-	if c.IsSingleComboRoleBased() {
-		return c.Alliances[0]
-	}
-	if allyIndex >= len(c.Alliances) {
-		return nil
-	}
-	return c.Alliances[allyIndex]
 }
 
 type AllianceComposition struct {

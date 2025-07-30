@@ -24,7 +24,6 @@ import (
 	sdkAuth "github.com/AccelByte/accelbyte-go-sdk/services-api/pkg/utils/auth"
 	"github.com/AccelByte/extend-core-matchmaker/pkg/config"
 	"github.com/AccelByte/extend-core-matchmaker/pkg/matchmaker/defaultmatchmaker"
-	"github.com/AccelByte/extend-core-matchmaker/pkg/metrics"
 	matchfunctiongrpc "github.com/AccelByte/extend-core-matchmaker/pkg/pb"
 	"github.com/AccelByte/extend-core-matchmaker/pkg/server"
 	"github.com/caarlos0/env"
@@ -154,7 +153,7 @@ func main() {
 		srvMetrics,
 	)
 
-	matchMaker := defaultmatchmaker.New(cfg, metrics.NewMetrics(promRegistry))
+	matchMaker := defaultmatchmaker.New(cfg)
 	matchfunctiongrpc.RegisterMatchFunctionServer(grpcServer, &server.MatchFunctionServer{
 		UnimplementedMatchFunctionServer: matchfunctiongrpc.UnimplementedMatchFunctionServer{},
 		MM:                               matchMaker,
