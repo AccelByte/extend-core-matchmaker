@@ -541,6 +541,19 @@ func findMatchingAlly(
 
 		var ticketsPerTeam [][]models.MatchmakingRequest
 
+		minMemberNumber := allianceRule.PlayerMaxNumber
+		for _, ticket := range tickets {
+			memberCount := len(ticket.PartyMembers)
+			if minMemberNumber > len(ticket.PartyMembers) {
+				minMemberNumber = memberCount
+			}
+		}
+
+		playerMaxNumber := allianceRule.PlayerMinNumber
+		if playerMaxNumber < minMemberNumber {
+			playerMaxNumber = minMemberNumber
+		}
+
 		// step 1: create a match with min team & min players
 		for i := 0; i < minAllyCount; i++ {
 			matchedTickets := FindPartyCombination(
@@ -548,7 +561,7 @@ func findMatchingAlly(
 				tickets,
 				pivotTicket,
 				allianceRule.PlayerMinNumber,
-				allianceRule.PlayerMinNumber,
+				playerMaxNumber,
 				nil,
 				blockedPlayerOption,
 			)

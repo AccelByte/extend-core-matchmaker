@@ -5,6 +5,7 @@
 package defaultmatchmaker
 
 import (
+	"sort"
 	"strings"
 	"time"
 
@@ -240,7 +241,17 @@ allsession:
 					}
 
 				findMatchingAlly:
-					for allyIndex, ally := range session.MatchingAllies {
+					// store allies index sorted by player count
+					sortedIndex := make([]int, 0, len(session.MatchingAllies))
+					for allyIndex := range session.MatchingAllies {
+						sortedIndex = append(sortedIndex, allyIndex)
+					}
+					sort.Slice(sortedIndex, func(i, j int) bool {
+						return session.MatchingAllies[sortedIndex[i]].CountPlayer() < session.MatchingAllies[sortedIndex[j]].CountPlayer()
+					})
+
+					for _, allyIndex := range sortedIndex {
+						ally := session.MatchingAllies[allyIndex]
 						// prepare PartyFinder params
 						minPlayer := allianceRule.PlayerMinNumber
 						maxPlayer := allianceRule.PlayerMaxNumber

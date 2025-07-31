@@ -131,7 +131,7 @@ func Test_normal_findParty(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := FindPartyCombination(nil, tt.args.Tickets, tt.args.PivotTicket, tt.args.MinPlayer, tt.args.MaxPlayer, false, nil, tt.args.Current, "")
+			got := FindPartyCombination(nil, tt.args.Tickets, tt.args.PivotTicket, tt.args.MinPlayer, tt.args.MaxPlayer, tt.args.Current, "")
 			if !assert.ElementsMatch(t, got, tt.want) {
 				t.Errorf("normal.findParty() = %v, want %v", got, tt.want)
 			}
