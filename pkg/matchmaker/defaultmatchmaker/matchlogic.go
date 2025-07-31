@@ -15,7 +15,6 @@ import (
 	"github.com/AccelByte/extend-core-matchmaker/pkg/config"
 	"github.com/AccelByte/extend-core-matchmaker/pkg/envelope"
 	"github.com/AccelByte/extend-core-matchmaker/pkg/models"
-	"github.com/AccelByte/extend-core-matchmaker/pkg/utils"
 
 	"github.com/AccelByte/extend-core-matchmaker/pkg/matchmaker"
 	player "github.com/AccelByte/extend-core-matchmaker/pkg/playerdata"
@@ -175,7 +174,6 @@ func (b defaultMatchMaker) runBackfilling(
 	defer wg.Done()
 	namespace, matchPool := getNamespaceMatchPool(tickets)
 
-	b.updateMatchAttempt(scope, requests)
 	updatedSessions, satisfiedSessions, satisfiedTickets, err := b.mm.MatchSessions(scope, namespace, matchPool, requests, sessions, channel)
 	if err != nil {
 		scope.Log.Errorf("error backfilling matches: %s", err)
@@ -187,7 +185,6 @@ func (b defaultMatchMaker) runBackfilling(
 	for _, result := range satisfiedSessions {
 		results <- fromMatchResultToBackfillProposal(result, satisfiedTickets, tickets)
 	}
-	b.deleteMatchAttempt(scope, requests, append(updatedSessions, satisfiedSessions...))
 }
 
 func getNextNRequests(ticketChannel chan matchmaker.Ticket, maxTicketCount int, ruleset models.RuleSet) ([]models.MatchmakingRequest, []matchmaker.Ticket) {
@@ -637,8 +634,6 @@ func (b defaultMatchMaker) runMatchMaking(rootScope *envelope.Scope, requests []
 
 	namespace, matchPool := getNamespaceMatchPool(sourceTickets)
 
-	b.updateMatchAttempt(scope, requests)
-
 	matchResults, _, err := b.mm.MatchPlayers(scope, namespace, matchPool, requests, modelChannel)
 	if err != nil {
 		scope.Log.Errorf("error making matches: %s", err)
@@ -650,37 +645,5 @@ func (b defaultMatchMaker) runMatchMaking(rootScope *envelope.Scope, requests []
 			matchedTicketCount += len(allies.MatchingParties)
 		}
 		resultChan <- fromMatchResult(result, sourceTickets, ruleSet)
-	}
-
-	b.deleteMatchAttempt(scope, requests, matchResults)
-}
-
-// TODO: remove
-func (b defaultMatchMaker) updateMatchAttempt(rootScope *envelope.Scope, requests []models.MatchmakingRequest) {
-	scope := rootScope.NewChildScope("updateMatchAttempt")
-	defer scope.Finish()
-
-	for i := range requests {
-		matchAttempt := float64(0)
-		if requests[i].PartyAttributes == nil {
-			requests[i].PartyAttributes = make(map[string]interface{})
-		} else {
-			var ok bool
-			matchAttempt, ok = utils.GetMapValueAs[float64](requests[i].PartyAttributes, models.AttributeMatchAttempt)
-			if ok {
-				matchAttempt++
-			}
-		}
-		requests[i].PartyAttributes[models.AttributeMatchAttempt] = matchAttempt
-		requests[i].Priority = int(matchAttempt)
-	}
-}
-
-func (b defaultMatchMaker) deleteMatchAttempt(rootScope *envelope.Scope, requests []models.MatchmakingRequest, matchResults []*models.MatchmakingResult) {
-	scope := rootScope.NewChildScope("deleteMatchAttempt")
-	defer scope.Finish()
-
-	for i := range requests {
-		delete(requests[i].PartyAttributes, models.AttributeMatchAttempt)
 	}
 }
