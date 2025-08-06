@@ -38,8 +38,8 @@ type PartyFinder interface {
 }
 
 // GetPartyFinder returns party finder implementations. We have 3 party finder types:
-// 1) newRoleBasedCombo() to find party for role-based with role combination (combo role-based),
-// 2) newRoleBasedUnique() to find party for role-based without role combination (unique role-based),
+// 1) newRoleBasedCombo() to find party for role-based with role combination (combo role-based), [NOTE: only available in matchmaking service build-in function]
+// 2) newRoleBasedUnique() to find party for role-based without role combination (unique role-based), [NOTE: only available in matchmaking service build-in function]
 // 3) newNormal() to find party for non role-based
 func GetPartyFinder(playerMinNumber, playerMaxNumber int, current []models.MatchmakingRequest) (pf PartyFinder) {
 	return newNormal(playerMinNumber, playerMaxNumber, current)
