@@ -2,6 +2,8 @@
 // This is licensed software from AccelByte Inc, for limitations
 // and restrictions contact your company contract manager.
 
+// Package defaultmatchmaker provides the default implementation of the MatchLogic interface.
+// This package contains the core matchmaking algorithms and logic for creating matches from tickets.
 package defaultmatchmaker
 
 import (
@@ -18,26 +20,31 @@ import (
 	reordertool "github.com/AccelByte/extend-core-matchmaker/pkg/utils/reorder-tool"
 )
 
+// Constants for attribute keys used in matchmaking
 const (
-	partyAttributesKey  = "party_attributes"
-	memberAttributesKey = models.AttributeMemberAttr
-	membersKey          = "party_members"
-	serverNameKey       = "server_name"
-	clientVersionKey    = "client_version"
-	userIDKey           = "user_id"
-	latencyMapKey       = "latency_map"
-	distanceCriteria    = "distance"
-	// June 6th, 1983 00:00:00
+	partyAttributesKey  = "party_attributes"         // Key for party-level attributes
+	memberAttributesKey = models.AttributeMemberAttr // Key for member-level attributes
+	membersKey          = "party_members"            // Key for party members
+	serverNameKey       = "server_name"              // Key for server name
+	clientVersionKey    = "client_version"           // Key for client version
+	userIDKey           = "user_id"                  // Key for user ID
+	latencyMapKey       = "latency_map"              // Key for latency mapping
+	distanceCriteria    = "distance"                 // Key for distance criteria
+	// June 6th, 1983 00:00:00 - Date used to force flexing rules
 	dateToForceFlexingRule = 423792000
 )
 
+// Ensure MatchMaker implements the matchmaker.Matchmaker interface
 var _ matchmaker.Matchmaker = (*MatchMaker)(nil)
 
+// MatchMaker is the main matchmaking engine that implements the Matchmaker interface.
+// It handles player matching, session management, and various matchmaking strategies.
 type MatchMaker struct {
-	cfg              *config.Config
-	isMatchAnyCommon bool
+	cfg              *config.Config // Configuration for the matchmaker
+	isMatchAnyCommon bool           // Flag to enable matching any common attributes
 }
 
+// NewMatchMaker creates a new instance of the MatchMaker with the given configuration.
 func NewMatchMaker(cfg *config.Config) *MatchMaker {
 	return &MatchMaker{
 		cfg:              cfg,
@@ -45,7 +52,8 @@ func NewMatchMaker(cfg *config.Config) *MatchMaker {
 	}
 }
 
-// MatchPlayers tries to match as many request as possible
+// MatchPlayers tries to match as many request as possible.
+// This is the main entry point for player matchmaking operations.
 //
 //nolint:gocyclo
 func (mm *MatchMaker) MatchPlayers(rootScope *envelope.Scope, namespace string, matchPool string, matchmakingRequests []models.MatchmakingRequest, channel models.Channel) ([]*models.MatchmakingResult, []models.MatchmakingRequest, error) {
@@ -55,28 +63,32 @@ func (mm *MatchMaker) MatchPlayers(rootScope *envelope.Scope, namespace string, 
 	var satisfiedTickets []models.MatchmakingRequest
 
 	var (
-		pivotMatchingCounter    int
-		findMatchingAllyCounter int
+		pivotMatchingCounter    int // Counter for pivot-based matching attempts
+		findMatchingAllyCounter int // Counter for ally finding attempts
 	)
 
+	// Early return if no requests to process
 	if len(matchmakingRequests) == 0 {
 		return nil, nil, nil
 	}
 
 	ruleset := channel.Ruleset
 
+	// Determine the alliance composition based on the ruleset
 	allianceComposition := DetermineAllianceComposition(ruleset)
 
+	// Check if alliance flexing is enabled
 	isUsingAllianceFlexing := false
 	if len(ruleset.AllianceFlexingRule) > 0 {
 		isUsingAllianceFlexing = true
 	}
 
-	// not enough requests to be matched together
+	// Check if there are enough requests to form a match
 	if len(matchmakingRequests) < allianceComposition.MinTeam && !isUsingAllianceFlexing {
 		return nil, nil, nil
 	}
 
+	// Count total players across all requests
 	playerCount := 0
 	for _, mmRequest := range matchmakingRequests {
 		playerCount += len(mmRequest.PartyMembers)
@@ -86,12 +98,13 @@ func (mm *MatchMaker) MatchPlayers(rootScope *envelope.Scope, namespace string, 
 		return nil, nil, nil
 	}
 
+	// Handle single player scenarios (1v1 or similar)
 	isSinglePlayer := allianceComposition.MaxPlayer == 1 && allianceComposition.MinTeam == 1 && allianceComposition.MaxTeam == 1
 	if isSinglePlayer {
 		return mm.handleSinglePlayer(scope, namespace, matchPool, matchmakingRequests, channel)
 	}
 
-	// pool lock timeout safeguard
+	// Set up timeout safeguard for pool lock
 	startTime := time.Now()
 	timeLimit := (constants.PoolLockTimeLimit * 2) / 5
 	if mm.cfg != nil && mm.cfg.MatchTimeLimitSecond > 0 {

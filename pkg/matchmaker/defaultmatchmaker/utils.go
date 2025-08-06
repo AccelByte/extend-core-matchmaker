@@ -2,6 +2,8 @@
 // This is licensed software from AccelByte Inc, for limitations
 // and restrictions contact your company contract manager.
 
+// Package defaultmatchmaker provides the default implementation of the MatchLogic interface.
+// This package contains the core matchmaking algorithms and logic for creating matches from tickets.
 package defaultmatchmaker
 
 import (
@@ -17,6 +19,8 @@ import (
 	"gopkg.in/typ.v4/slices"
 )
 
+// countPlayers counts the total number of players across all matchmaking requests.
+// This is used to determine if there are enough players to form a match.
 func countPlayers(mmReq []models.MatchmakingRequest) int {
 	var sum int
 	for _, req := range mmReq {
@@ -25,6 +29,8 @@ func countPlayers(mmReq []models.MatchmakingRequest) int {
 	return sum
 }
 
+// getPivotTicketIndexFromTickets finds the index of a pivot ticket within a slice of tickets.
+// The pivot ticket is used as the reference point for matchmaking algorithms.
 func getPivotTicketIndexFromTickets(tickets []models.MatchmakingRequest, pivotTicket *models.MatchmakingRequest) (pivotIndex int) {
 	for i, v := range tickets {
 		if pivotTicket.PartyID == v.PartyID {
@@ -35,6 +41,8 @@ func getPivotTicketIndexFromTickets(tickets []models.MatchmakingRequest, pivotTi
 	return pivotIndex
 }
 
+// getPriorityTicketIndexesFromTickets finds all tickets that have priority status.
+// Priority tickets are processed first in the matchmaking queue.
 func getPriorityTicketIndexesFromTickets(tickets []models.MatchmakingRequest) (priorityIndexes []int) {
 	for i, ticket := range tickets {
 		if ticket.IsPriority() {
@@ -44,8 +52,8 @@ func getPriorityTicketIndexesFromTickets(tickets []models.MatchmakingRequest) (p
 	return priorityIndexes
 }
 
-// reorderTickets return the exact same element of tickets but in new order based on newIndexes
-// if index lower than 0 or exceed the tickets length, this function will just skip those index
+// reorderTickets returns the exact same elements of tickets but in a new order based on newIndexes.
+// If an index is lower than 0 or exceeds the tickets length, this function will just skip those indexes.
 func reorderTickets(tickets []models.MatchmakingRequest, newIndexes []int) (reorderedTickets []models.MatchmakingRequest) {
 	reorderedTickets = make([]models.MatchmakingRequest, 0)
 	for _, newIndex := range newIndexes {
@@ -57,20 +65,26 @@ func reorderTickets(tickets []models.MatchmakingRequest, newIndexes []int) (reor
 	return reorderedTickets
 }
 
+// getTicketRegionToTryCount determines how many regions to try for a given ticket.
+// This is based on the ticket's age and the channel's expansion rate configuration.
 func getTicketRegionToTryCount(ticket *models.MatchmakingRequest, channel *models.Channel) int {
 	regionsToTry := getTicketRegionExpansionStep(ticket, channel)
-	regionsToTry = mathutil.Max(mathutil.Min(regionsToTry, len(ticket.SortedLatency)), 1) // don't let this be below 1
+	regionsToTry = mathutil.Max(mathutil.Min(regionsToTry, len(ticket.SortedLatency)), 1) // Don't let this be below 1
 	return regionsToTry
 }
 
+// getTicketRegionExpansionStep calculates the region expansion step for a ticket.
+// This determines how many regions to consider based on the ticket's age and expansion rate.
 func getTicketRegionExpansionStep(ticket *models.MatchmakingRequest, channel *models.Channel) int {
 	step := 1
 	expansionRateMs := channel.Ruleset.RegionExpansionRateMs
 	if expansionRateMs > 0 {
+		// Calculate step based on ticket age and expansion rate
 		ticketAge := float64(Now().Sub(time.Unix(ticket.CreatedAt, 0)))
 		regionExpansionRate := float64(expansionRateMs * int(time.Millisecond))
 		step = int(math.Ceil(ticketAge / regionExpansionRate))
 	} else {
+		// Use attempt count as fallback
 		attemptCount := 0
 		val, ok := ticket.PartyAttributes[models.AttributeMatchAttempt]
 		if ok {
@@ -81,6 +95,8 @@ func getTicketRegionExpansionStep(ticket *models.MatchmakingRequest, channel *mo
 	return step
 }
 
+// getTicketMaxLatency calculates the maximum acceptable latency for a ticket.
+// This is based on the initial range, expansion steps, and maximum allowed latency.
 func getTicketMaxLatency(ticket *models.MatchmakingRequest, channel *models.Channel) int {
 	initialRange := 200
 	if channel.Ruleset.RegionLatencyInitialRangeMs > 0 {
@@ -92,9 +108,9 @@ func getTicketMaxLatency(ticket *models.MatchmakingRequest, channel *models.Chan
 	}
 	steps := getTicketRegionExpansionStep(ticket, channel)
 	steps = mathutil.Max(steps, 1)
-	latency := initialRange + (steps-1)*additionalStep // by default start from 100ms for every expansion add 50ms
+	latency := initialRange + (steps-1)*additionalStep // By default start from 100ms for every expansion add 50ms
 	if channel.Ruleset.RegionLatencyMaxMs > 0 {
-		latency = mathutil.Min(latency, channel.Ruleset.RegionLatencyMaxMs) // don't allow to go over the max
+		latency = mathutil.Min(latency, channel.Ruleset.RegionLatencyMaxMs) // Don't allow to go over the max
 	}
 	return latency
 }

@@ -2,6 +2,8 @@
 // This is licensed software from AccelByte Inc, for limitations
 // and restrictions contact your company contract manager.
 
+// Package defaultmatchmaker provides the default implementation of the MatchLogic interface.
+// This package contains the core matchmaking algorithms and logic for creating matches from tickets.
 package defaultmatchmaker
 
 import (
@@ -14,19 +16,22 @@ import (
 	"github.com/AccelByte/extend-core-matchmaker/pkg/models"
 )
 
-// TBD: rebalance for match session use different logic,
 // while adding ticket to a session, we should check the mmr balance
 
+// MatchSessions attempts to add additional players to existing game sessions.
+// This method handles backfill scenarios where existing sessions need more players.
+//
 //nolint:gocyclo
 func (mm *MatchMaker) MatchSessions(rootScope *envelope.Scope, namespace string, matchPool string, tickets []models.MatchmakingRequest, sessions []*models.MatchmakingResult, channel models.Channel) (updatedSessions []*models.MatchmakingResult, satisfiedSessions []*models.MatchmakingResult, satisfiedTickets []models.MatchmakingRequest, err error) {
 	scope := rootScope.NewChildScope("Matchmaker.MatchSessions")
 	defer scope.Finish()
 
+	// Early return if no tickets or sessions to process
 	if len(tickets) == 0 || len(sessions) == 0 {
 		return nil, nil, nil, nil
 	}
 
-	// pool lock timeout safeguard
+	// Set up timeout safeguard for pool lock
 	startTime := time.Now()
 	timeLimit := (constants.PoolLockTimeLimit * 2) / 5
 	if mm.cfg != nil && mm.cfg.MatchTimeLimitSecond > 0 {
@@ -36,35 +41,37 @@ func (mm *MatchMaker) MatchSessions(rootScope *envelope.Scope, namespace string,
 	updatedSessions = make([]*models.MatchmakingResult, 0)
 	satisfiedSessions = make([]*models.MatchmakingResult, 0)
 
-	// prioritize request with more players
+	// Prioritize requests with more players if configured
 	if mm.cfg != nil && mm.cfg.PrioritizeLargerParties {
 		sortDESC(tickets)
 	}
 
-	// for each session
+	// Process each session to find suitable tickets
 allsession:
 	for _, session := range sessions {
-		// determine if rule needs flexing
+		// Determine if rule needs flexing based on session state
 		activeRuleset, _ := applyRuleFlexingForSession(*session, channel.Ruleset)
 		activeRuleset, _ = applyAllianceFlexingRulesForSession(*session, activeRuleset)
 		scope.Log.WithField("ruleset", activeRuleset).Debug("ruleset applied")
 
+		// Search for matching tickets for this session
 		// [MANUALSEARCH]
 		result := mm.SearchMatchTicketsBySession(scope, &channel.Ruleset, &activeRuleset, &channel, *session, tickets)
 
 	tickethitloop:
 
+		// Process each candidate ticket for this session
 		// [MANUALSEARCH]
 		for resultIndex := range result {
 			candidateTicket := &result[resultIndex]
 
-			// check if still have time to try
+			// Check if still have time to try
 			elapsed := time.Since(startTime)
 			if elapsed >= timeLimit {
 				break allsession
 			}
 
-			// prevent duplicate userid match into same session
+			// Prevent duplicate userid match into same session
 			sessionUserIDs := session.GetMapUserIDs()
 			for _, member := range candidateTicket.PartyMembers {
 				if _, exist := sessionUserIDs[member.UserID]; exist {
@@ -72,10 +79,10 @@ allsession:
 				}
 			}
 
-			// validate region latency in 3 steps:
+			// Validate region latency in 3 steps:
 			sessionRegion := strings.TrimSpace(session.Region)
 			if sessionRegion != "" {
-				// just to re-ensure candidate ticket's region is same with session region
+				// Just to re-ensure candidate ticket's region is same with session region
 				filteredRegions := filterRegionByStep(candidateTicket, &channel)
 				var isRegionMatch bool
 				for _, region := range filteredRegions {
@@ -84,7 +91,7 @@ allsession:
 						break
 					}
 				}
-				// skip ticket if somehow its not match
+				// Skip ticket if somehow its not match
 				if !isRegionMatch {
 					scope.Log.WithField("match_id", session.MatchID).
 						WithField("channel", session.Channel).
@@ -94,7 +101,7 @@ allsession:
 					continue
 				}
 			} else {
-				// if session region is empty just log warn
+				// If session region is empty just log warn
 				scope.Log.WithField("match_id", session.MatchID).
 					WithField("channel", session.Channel).
 					Warn("session region is empty")

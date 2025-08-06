@@ -2,6 +2,8 @@
 // This is licensed software from AccelByte Inc, for limitations
 // and restrictions contact your company contract manager.
 
+// Package defaultmatchmaker provides the default implementation of the MatchLogic interface.
+// This package contains the core matchmaking algorithms and logic for creating matches from tickets.
 package defaultmatchmaker
 
 import (
@@ -18,13 +20,16 @@ import (
 	"gopkg.in/typ.v4/slices"
 )
 
+// matchTicket represents a ticket with an associated score for ranking during search
 type matchTicket struct {
-	ticket models.MatchmakingRequest
-	score  float64
+	ticket models.MatchmakingRequest // The actual matchmaking request
+	score  float64                   // Score used for ranking and prioritization
 }
 
+// SearchMatchTickets searches for tickets that match the given pivot ticket based on various criteria.
+// This is the main search function for finding compatible tickets for matchmaking.
 func (mm *MatchMaker) SearchMatchTickets(originalRuleSet, activeRuleSet *models.RuleSet, channel *models.Channel, regionIndex int, pivot *models.MatchmakingRequest, tickets []models.MatchmakingRequest, filteredRegion []models.Region) []models.MatchmakingRequest {
-	// define filter by pivot
+	// Define filters based on the pivot ticket
 	distances := getFilterByDistance(activeRuleSet, pivot.PartyAttributes)
 	options := getFilterByMatchOption(activeRuleSet, pivot.PartyAttributes)
 	anyCrossPlay := getFilterByCrossPlay(activeRuleSet, pivot.PartyAttributes)
@@ -32,13 +37,14 @@ func (mm *MatchMaker) SearchMatchTickets(originalRuleSet, activeRuleSet *models.
 	additionCriterias := getFilterByAdditionalCriteria(pivot)
 	pivotUserID := pivot.GetMapUserIDs()
 
+	// Remove cross_platform from options if anyCrossPlay has its own matching
 	if anyCrossPlay != nil {
-		// remove cross_platform from options, anyCrossPlay have its own matching
 		options = pie.Filter(options, func(o option) bool {
 			return o.name != models.AttributeCrossPlatform
 		})
 	}
 
+	// Build sets for user ID and blocked player checking
 	userIDSet := pivot.GetMemberUserIDSet()
 	blockSet := make(map[string]struct{})
 	models.RangeBlockedPlayerUserIDs(pivot.PartyAttributes)(func(userID string) bool {
@@ -46,13 +52,14 @@ func (mm *MatchMaker) SearchMatchTickets(originalRuleSet, activeRuleSet *models.
 		return true
 	})
 
+	// Get the pivot region for latency matching
 	var pivotRegion *models.Region
 	if len(filteredRegion) > 0 && len(filteredRegion) > regionIndex {
 		pivotRegion = &filteredRegion[regionIndex]
 	}
 	skipFilteredRegion := skipFilterCandidateRegion(pivot, channel)
 
-	// filter tickets
+	// Filter tickets based on various criteria
 	matchTickets := make([]matchTicket, 0)
 ticketLoop:
 	for ticketIndex := range tickets {
@@ -60,76 +67,79 @@ ticketLoop:
 		var totalScore float64
 		var finalizeFunctions []func()
 
-		// avoid match with same party id
+		// Avoid matching with same party ID
 		if ticket.PartyID == pivot.PartyID {
 			continue
 		}
 
-		// avoid match with same user id
+		// Avoid matching with same user ID
 		for _, member := range ticket.PartyMembers {
 			if _, ok := pivotUserID[member.UserID]; ok {
 				continue ticketLoop
 			}
 		}
 
+		// Check distance-based matching
 		isMatch, score := matchByDistance(ticket, originalRuleSet, distances)
 		if !isMatch {
 			continue
 		}
 		totalScore += score
 
+		// Check cross-play compatibility
 		if ok, fn := matchByAnyCrossPlay(ticket, anyCrossPlay, mm.isMatchAnyCommon); !ok {
 			continue
 		} else if fn != nil {
 			finalizeFunctions = append(finalizeFunctions, fn)
 		}
 
+		// Check match option compatibility
 		if ok, fns := matchByMatchOption(ticket, options, mm.isMatchAnyCommon); !ok {
 			continue
 		} else {
 			finalizeFunctions = append(finalizeFunctions, fns...)
 		}
 
+		// Check party attribute compatibility
 		if !matchByPartyAttribute(ticket, partyAttributes, activeRuleSet.MatchOptionsReferredForBackfill) {
 			continue
 		}
 
+		// Check blocked players
 		if ok, fn := matchByBlockedPlayers(ticket, userIDSet, blockSet, channel.Ruleset.BlockedPlayerOption); !ok {
 			continue
 		} else if fn != nil {
 			finalizeFunctions = append(finalizeFunctions, fn)
 		}
 
+		// Check region latency and normalize
 		isMatch, score = matchByRegionLatencyNormalize(ticket, pivotRegion, channel, skipFilteredRegion)
 		if !isMatch {
 			continue
 		}
 		totalScore += score * channel.Ruleset.GetRegionLatencyRuleWeight()
 
+		// Check additional criteria
 		if !matchByAdditionalCriteria(ticket, additionCriterias) {
 			continue
 		}
 
+		// Add ticket to results if all criteria are met
 		matchTickets = append(matchTickets, matchTicket{
 			ticket: *ticket,
 			score:  totalScore,
 		})
 
-		// call finalize function for matched ticket
+		// Call finalize functions for matched ticket
 		for _, fn := range finalizeFunctions {
 			fn()
 		}
 	}
 
-	// with rule (THE SMALLER THE BETTER)
-	// - matchByDistance (ex: MMR)
-	// - matchByRegionLatency
-	// - firstCreatedAt
-	// - matchByMatchOption (especially for ANY)
-	// - etc
-
+	// Sort tickets based on priority, score, and latency
 	sortMatchTickets(matchTickets, "")
 
+	// Convert matchTickets to models.MatchmakingRequest slice
 	results := make([]models.MatchmakingRequest, len(matchTickets))
 	for i, v := range matchTickets {
 		results[i] = v.ticket
@@ -142,7 +152,7 @@ func (mm *MatchMaker) SearchMatchTicketsBySession(rootScope *envelope.Scope, ori
 	scope := rootScope.NewChildScope("ManualSearch.SearchMatchTicketsBySession")
 	defer scope.Finish()
 
-	// define filter by pivot
+	// Define filter by pivot
 	distances := getFilterByDistance(activeRuleSet, session.PartyAttributes)
 	options := getFilterByMatchOption(activeRuleSet, session.PartyAttributes)
 	anyCrossPlay := getFilterByCrossPlay(activeRuleSet, session.PartyAttributes)

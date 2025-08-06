@@ -2,6 +2,8 @@
 // This is licensed software from AccelByte Inc, for limitations
 // and restrictions contact your company contract manager.
 
+// Package defaultmatchmaker provides the default implementation of the MatchLogic interface.
+// This package contains the core matchmaking algorithms and logic for creating matches from tickets.
 package defaultmatchmaker
 
 import (
@@ -24,15 +26,19 @@ import (
 	pie "github.com/elliotchance/pie/v2"
 )
 
+// externalPartyID is used to identify parties that are not part of the internal system
 const externalPartyID = "external"
 
+// defaultMatchMaker implements the MatchLogic interface with the default matchmaking algorithm.
+// It handles ticket validation, match creation, and backfill operations.
 type defaultMatchMaker struct {
-	unmatchedTickets    []matchmaker.Ticket
-	mm                  matchmaker.Matchmaker
-	indexedTicketLength int
+	unmatchedTickets    []matchmaker.Ticket   // Tickets that haven't been matched yet
+	mm                  matchmaker.Matchmaker // The underlying matchmaker implementation
+	indexedTicketLength int                   // Size of ticket chunks for processing
 }
 
-// New returns a defaultMatchMaker of the MatchLogic interface
+// New returns a defaultMatchMaker of the MatchLogic interface.
+// This is the main constructor for creating a new default matchmaker instance.
 func New(cfg *config.Config) matchmaker.MatchLogic {
 	return defaultMatchMaker{
 		indexedTicketLength: cfg.TicketChunkSize,
@@ -40,17 +46,20 @@ func New(cfg *config.Config) matchmaker.MatchLogic {
 	}
 }
 
-// ValidateTicket returns a bool if the match ticket is valid
+// ValidateTicket returns a bool if the match ticket is valid.
+// This method checks if a ticket meets all requirements to be queued for matchmaking.
 func (b defaultMatchMaker) ValidateTicket(scope *envelope.Scope, matchTicket matchmaker.Ticket, matchRules interface{}) (bool, error) {
 	scope.Log.Info("MATCHMAKER: validate ticket")
 	scope.Log.Info("Ticket Validation successful")
 
+	// Type assertion to get the ruleset
 	ruleSet, ok := matchRules.(models.RuleSet)
 	if !ok {
 		scope.Log.WithField("RuleSet", fmt.Sprintf("%T", matchRules)).Error("invalid RuleSet type")
 		return false, errors.New("invalid ruleset")
 	}
 
+	// Check if the ticket has valid latency to at least one region
 	hasValidLatency := false
 	for _, latency := range matchTicket.Latencies {
 		if latency <= int64(ruleSet.RegionLatencyMaxMs) {
@@ -66,21 +75,24 @@ func (b defaultMatchMaker) ValidateTicket(scope *envelope.Scope, matchTicket mat
 	return true, nil
 }
 
-// EnrichTicket is responsible for adding logic to the match ticket before match making
+// EnrichTicket is responsible for adding logic to the match ticket before match making.
+// This method can modify or add data to tickets before they enter the matchmaking process.
 func (b defaultMatchMaker) EnrichTicket(scope *envelope.Scope, matchTicket matchmaker.Ticket, ruleSet interface{}) (ticket matchmaker.Ticket, err error) {
 	scope.Log.Info("MATCHMAKER: enrich ticket")
 
 	return matchTicket, nil
 }
 
-// GetStatCodes returns the string slice of the stat codes in matchrules
+// GetStatCodes returns the string slice of the stat codes in matchrules.
+// This method provides statistics codes for monitoring and metrics collection.
 func (b defaultMatchMaker) GetStatCodes(scope *envelope.Scope, matchRules interface{}) []string {
 	scope.Log.Infof("MATCHMAKER: stat codes: %s", []string{})
 
 	return []string{}
 }
 
-// RulesFromJSON returns the ruleset from the Game rules
+// RulesFromJSON returns the ruleset from the Game rules.
+// This method parses JSON configuration into a structured ruleset that the matchmaker can use.
 func (b defaultMatchMaker) RulesFromJSON(rootScope *envelope.Scope, jsonRules string) (interface{}, error) {
 	scope := rootScope.NewChildScope("defaultMatchMaker.RulesFromJson")
 	defer scope.Finish()
