@@ -218,9 +218,6 @@ allsession:
 				}
 			}
 
-			// filter based on session's subgamemode
-			var selectedSubGamemodeNames []string
-
 			// find proper alliance for ticket
 			teamCount := len(session.MatchingAllies)
 			playerPerTeamCount := make([]int, teamCount)
@@ -354,16 +351,6 @@ allsession:
 							}
 						}
 					}
-				}
-
-				// update subgamemodes list
-				// should be in format of []interface{}
-				if len(selectedSubGamemodeNames) > 0 {
-					var values []interface{}
-					for _, v := range selectedSubGamemodeNames {
-						values = append(values, v)
-					}
-					session.PartyAttributes[models.AttributeSubGameMode] = values
 				}
 
 				// update member attributes

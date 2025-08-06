@@ -414,31 +414,6 @@ const (
 	AttributeRole                 = "role"
 )
 
-// GetSubGameModeNames return list of sub game mode from party attribute "sub_game_mode".
-func GetSubGameModeNames(partyAttributes map[string]interface{}) ([]string, error) {
-	attrSubGameMode, ok := partyAttributes[AttributeSubGameMode]
-	if !ok {
-		return nil, nil
-	}
-
-	result, ok := attrSubGameMode.(string)
-	if ok {
-		return []string{result}, nil
-	}
-
-	bytesSubGameMode, err := json.Marshal(attrSubGameMode)
-	if err != nil {
-		return nil, fmt.Errorf("unable to marshal attribute sub game mode: %v", err)
-	}
-
-	var subGameMode []string
-	if err = json.Unmarshal(bytesSubGameMode, &subGameMode); err != nil {
-		return nil, fmt.Errorf("unable to convert to string array: %v", err)
-	}
-
-	return subGameMode, nil
-}
-
 func GetBlockedPlayerUserIDs(partyAttributes map[string]interface{}) []string {
 	var blockedPlayers []string
 	if v, ok := partyAttributes[AttributeBlocked]; ok {
@@ -560,18 +535,6 @@ func (r MatchmakingRequest) GetMemberUserIDSet() map[string]struct{} {
 		userIDSet[member.UserID] = struct{}{}
 	}
 	return userIDSet
-}
-
-func (r MatchmakingRequest) GetSubGameModeNames() []string {
-	subGameMode, err := GetSubGameModeNames(r.PartyAttributes)
-	if err != nil {
-		logrus.
-			WithField("party_id", r.PartyID).
-			WithError(err).
-			Error("unable to get sub game mode")
-		return nil
-	}
-	return subGameMode
 }
 
 func (r MatchmakingRequest) GetBlockedPlayerUserIDs() []string {
@@ -787,18 +750,6 @@ func (r MatchmakingResult) GetMemberUserIDSet() map[string]struct{} {
 	return userIDSet
 }
 
-func (r MatchmakingResult) GetSubGameModeNames() []string {
-	subGameMode, err := GetSubGameModeNames(r.PartyAttributes)
-	if err != nil {
-		logrus.
-			WithField("match_id", r.MatchID).
-			WithError(err).
-			Error("unable to get sub game mode")
-		return nil
-	}
-	return subGameMode
-}
-
 func (r MatchmakingResult) GetBlockedPlayerUserIDs() []string {
 	return GetBlockedPlayerUserIDs(r.PartyAttributes)
 }
@@ -909,25 +860,24 @@ func (b BlockedPlayerOption) Validate() error {
 
 // RuleSet is a rule set.
 type RuleSet struct {
-	AutoBackfill                       bool                   `bson:"auto_backfill"                          json:"auto_backfill"`
-	RegionExpansionRateMs              int                    `bson:"region_expansion_rate_ms"               json:"region_expansion_rate_ms"               valid:"range(0|2147483647)"` // how old a ticket is before expanding the latency and region search by 1 step
-	RegionExpansionRangeMs             int                    `bson:"region_expansion_range_ms"              json:"region_expansion_range_ms"              valid:"range(0|2147483647)"` // how big 1 step of latency expansion is
-	RegionLatencyInitialRangeMs        int                    `bson:"region_latency_initial_range_ms"        json:"region_latency_initial_range_ms"        valid:"range(0|2147483647)"` // minimum latency to allow matching in a region
-	RegionLatencyMaxMs                 int                    `bson:"region_latency_max_ms"                  json:"region_latency_max_ms"                  valid:"range(0|2147483647)"` // maximum latency search can expand to in 1 region
-	AllianceRule                       AllianceRule           `bson:"allianceRule"                           json:"alliance"`
-	MatchingRule                       []MatchingRule         `bson:"matchingRule"                           json:"matching_rule"`
-	FlexingRule                        []FlexingRule          `bson:"flexingRule"                            json:"flexing_rule"`
-	AllianceFlexingRule                []AllianceFlexingRule  `bson:"alliance_flexing_rule"                  json:"alliance_flexing_rule"`
-	MatchOptions                       MatchOptionRule        `bson:"match_options"                          json:"match_options"`
-	SubGameModes                       map[string]SubGameMode `bson:"sub_game_modes"                         json:"sub_game_modes"` // note: unsupported
-	RebalanceEnable                    *bool                  `json:"rebalance_enable,omitempty"`
-	RebalanceVersion                   int                    `json:"rebalance_version,omitempty"` // can be 1 or 2. Any other value will default to latest.
-	TicketObservabilityEnable          bool                   `bson:"ticket_observability_enable"            json:"ticket_observability_enable"            optional:"true"`
-	MatchOptionsReferredForBackfill    bool                   `bson:"match_options_referred_for_backfill"    json:"match_options_referred_for_backfill"    optional:"true"`
-	BlockedPlayerOption                BlockedPlayerOption    `bson:"blocked_player_option"                  json:"blocked_player_option,omitempty"        optional:"true"`
-	MaxDelayMs                         int                    `bson:"max_delay_ms"                           json:"max_delay_ms,omitempty"                 optional:"true"             valid:"range(0|2147483647)"`
-	DisableBidirectionalLatencyAfterMs int                    `bson:"disable_bidirectional_latency_after_ms" json:"disable_bidirectional_latency_after_ms" optional:"true"             valid:"range(0|2147483647)"`
-	RegionLatencyRuleWeight            *float64               `bson:"region_latency_rule_weight"             json:"region_latency_rule_weight,omitempty"   optional:"true"             valid:"range(0|1000)"`
+	AutoBackfill                       bool                  `bson:"auto_backfill"                          json:"auto_backfill"`
+	RegionExpansionRateMs              int                   `bson:"region_expansion_rate_ms"               json:"region_expansion_rate_ms"               valid:"range(0|2147483647)"` // how old a ticket is before expanding the latency and region search by 1 step
+	RegionExpansionRangeMs             int                   `bson:"region_expansion_range_ms"              json:"region_expansion_range_ms"              valid:"range(0|2147483647)"` // how big 1 step of latency expansion is
+	RegionLatencyInitialRangeMs        int                   `bson:"region_latency_initial_range_ms"        json:"region_latency_initial_range_ms"        valid:"range(0|2147483647)"` // minimum latency to allow matching in a region
+	RegionLatencyMaxMs                 int                   `bson:"region_latency_max_ms"                  json:"region_latency_max_ms"                  valid:"range(0|2147483647)"` // maximum latency search can expand to in 1 region
+	AllianceRule                       AllianceRule          `bson:"allianceRule"                           json:"alliance"`
+	MatchingRule                       []MatchingRule        `bson:"matchingRule"                           json:"matching_rule"`
+	FlexingRule                        []FlexingRule         `bson:"flexingRule"                            json:"flexing_rule"`
+	AllianceFlexingRule                []AllianceFlexingRule `bson:"alliance_flexing_rule"                  json:"alliance_flexing_rule"`
+	MatchOptions                       MatchOptionRule       `bson:"match_options"                          json:"match_options"`
+	RebalanceEnable                    *bool                 `json:"rebalance_enable,omitempty"`
+	RebalanceVersion                   int                   `json:"rebalance_version,omitempty"` // can be 1 or 2. Any other value will default to latest.
+	TicketObservabilityEnable          bool                  `bson:"ticket_observability_enable"            json:"ticket_observability_enable"            optional:"true"`
+	MatchOptionsReferredForBackfill    bool                  `bson:"match_options_referred_for_backfill"    json:"match_options_referred_for_backfill"    optional:"true"`
+	BlockedPlayerOption                BlockedPlayerOption   `bson:"blocked_player_option"                  json:"blocked_player_option,omitempty"        optional:"true"`
+	MaxDelayMs                         int                   `bson:"max_delay_ms"                           json:"max_delay_ms,omitempty"                 optional:"true"             valid:"range(0|2147483647)"`
+	DisableBidirectionalLatencyAfterMs int                   `bson:"disable_bidirectional_latency_after_ms" json:"disable_bidirectional_latency_after_ms" optional:"true"             valid:"range(0|2147483647)"`
+	RegionLatencyRuleWeight            *float64              `bson:"region_latency_rule_weight"             json:"region_latency_rule_weight,omitempty"   optional:"true"             valid:"range(0|1000)"`
 
 	ExtraAttributes ExtraAttributes `bson:"-" json:"extra_attributes,omitempty" optional:"true"`
 
@@ -967,13 +917,6 @@ func (ruleSet *RuleSet) Validate() error {
 
 	for _, matchOption := range ruleSet.MatchOptions.Options {
 		err := matchOption.Validate()
-		if err != nil {
-			return err
-		}
-	}
-
-	for _, subGameMode := range ruleSet.SubGameModes {
-		err := subGameMode.Validate()
 		if err != nil {
 			return err
 		}
@@ -1089,7 +1032,6 @@ type AllianceRule struct {
 	MaxNumber       int `json:"max_number"        valid:"range(0|2147483647)"`
 	PlayerMinNumber int `json:"player_min_number" valid:"range(0|2147483647)"`
 	PlayerMaxNumber int `json:"player_max_number" valid:"range(0|2147483647)"`
-	Combination     `json:"combination"`
 }
 
 func (reqData *AllianceRule) Validate() error {
@@ -1112,10 +1054,6 @@ func (reqData *AllianceRule) Validate() error {
 
 	if reqData.PlayerMinNumber == 0 || reqData.PlayerMaxNumber == 0 {
 		return errors.New("rule should have minimum 1 player in alliance")
-	}
-
-	if err := reqData.Combination.Validate(reqData.MaxNumber, reqData.PlayerMinNumber, reqData.PlayerMaxNumber); err != nil {
-		return err
 	}
 
 	return nil
@@ -1233,87 +1171,6 @@ func (a AllianceFlexingRule) Validate() error {
 	return nil
 }
 
-type UpdateRuleset struct {
-	Alliance             *UpdateAllianceRule     `json:"alliance"`
-	MatchingRules        *[]MatchingRule         `json:"matchingRules,omitempty"`
-	FlexingRules         *[]FlexingRule          `json:"flexingRules,omitempty"`
-	AllianceFlexingRules *[]AllianceFlexingRule  `json:"alliance_flexing_rule"`
-	MatchOptions         *MatchOptionRule        `json:"match_options,omitempty"`
-	SubGameModes         *map[string]SubGameMode `json:"sub_game_modes,omitempty"`
-}
-
-type UpdateAllianceRule struct {
-	MinNumber       int `json:"minNumber,omitempty"       valid:"range(0|2147483647)"`
-	MaxNumber       int `json:"maxNumber,omitempty"       valid:"range(0|2147483647)"`
-	PlayerMinNumber int `json:"playerMinNumber,omitempty" valid:"range(0|2147483647)"`
-	PlayerMaxNumber int `json:"playerMaxNumber,omitempty" valid:"range(0|2147483647)"`
-	*Combination    `json:"combination,omitempty"`
-}
-
-func (reqData *UpdateAllianceRule) Validate() error {
-	_, err := validator.ValidateStruct(reqData)
-	if err != nil {
-		return err
-	}
-
-	if reqData.MinNumber > reqData.MaxNumber {
-		return errors.New("maximum alliance number must be greater than or equal with minimum alliance number")
-	}
-
-	if reqData.MinNumber == 0 || reqData.MaxNumber == 0 {
-		return errors.New("rule should have minimum 1 alliance")
-	}
-
-	if reqData.PlayerMinNumber > reqData.PlayerMaxNumber {
-		return errors.New("maximum player number must be greater than or equal with minimum player number")
-	}
-
-	if reqData.PlayerMinNumber == 0 || reqData.PlayerMaxNumber == 0 {
-		return errors.New("rule should have minimum 1 player in alliance")
-	}
-
-	if reqData.Combination != nil {
-		if err := reqData.Combination.Validate(reqData.MaxNumber, reqData.PlayerMinNumber, reqData.PlayerMaxNumber); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-type SubGameMode struct {
-	Name                string                `bson:"name"                  json:"name"                  valid:"stringlength(1|64),lowercase" x-nullable:"false"`
-	AllianceRule        AllianceRule          `bson:"allianceRule"          json:"alliance"`
-	AllianceFlexingRule []AllianceFlexingRule `bson:"alliance_flexing_rule" json:"alliance_flexing_rule"`
-}
-
-func (s SubGameMode) Validate() error {
-	if s.Name == "" {
-		return errors.New("sub game mode name cannot be empty")
-	}
-
-	if _, err := validator.ValidateStruct(s); err != nil {
-		return err
-	}
-
-	if err := s.AllianceRule.Validate(); err != nil {
-		return err
-	}
-
-	for _, allianceFlexingRule := range s.AllianceFlexingRule {
-		if err := allianceFlexingRule.Validate(); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// CreateChannelResponse is the model for channel response body.
-type CreateChannelResponse struct {
-	Channel
-}
-
 // Channel contains channel information.
 type Channel struct {
 	Ruleset RuleSet `bson:"ruleset" json:"ruleset"`
@@ -1322,23 +1179,11 @@ type Channel struct {
 // GetAllianceRules return alliance rule whether it is from game mode or sub game mode.
 func (c Channel) GetAllianceRules() []AllianceRule {
 	var allianceRules []AllianceRule
-	if len(c.Ruleset.SubGameModes) > 0 {
-		for _, subGameMode := range c.Ruleset.SubGameModes {
-			allianceRules = append(allianceRules, subGameMode.AllianceRule)
-		}
-	} else {
+	{
 		// game mode alliance rule
 		allianceRules = []AllianceRule{c.Ruleset.AllianceRule}
 	}
 	return allianceRules
-}
-
-// Pagination is intended to be used as a response that contain pagination.
-type Pagination struct {
-	First    string `json:"first"`
-	Previous string `json:"previous"`
-	Next     string `json:"next"`
-	Last     string `json:"last"`
 }
 
 // MatchingRule defines a matching rule
@@ -1444,67 +1289,6 @@ type Role struct {
 	Name string `bson:"name" json:"name" valid:"stringlength(1|64),lowercase" x-nullable:"false"`
 	Min  int    `bson:"min"  json:"min"  valid:"range(0|2147483647)"          x-nullable:"false"`
 	Max  int    `bson:"max"  json:"max"  valid:"range(0|2147483647)"          x-nullable:"false"`
-}
-
-type Combination struct {
-	HasCombination bool     `bson:"hasCombination" json:"has_combination"`
-	Alliances      [][]Role `bson:"alliances"      json:"alliances"`
-
-	// below is to make role based more lenient
-	RoleFlexingEnable bool `bson:"roleFlexingEnable" json:"role_flexing_enable"`
-	RoleFlexingSecond int  `bson:"roleFlexingSecond" json:"role_flexing_second"`
-	RoleFlexingPlayer int  `bson:"roleFlexingPlayer" json:"role_flexing_player"`
-}
-
-func (c Combination) Validate(maxNumber, playerMinNumber, playerMaxNumber int) error {
-	if !c.HasCombination {
-		return nil
-	}
-	if len(c.Alliances) == 0 {
-		return nil
-	}
-	if len(c.Alliances) > 1 && len(c.Alliances) != maxNumber {
-		return ValidationErrorTotalCombination
-	}
-	for _, roles := range c.Alliances {
-		var totalMinRole, totalMaxRole int
-		for _, role := range roles {
-			if role.Max > playerMaxNumber {
-				return ValidationErrorMaxRole
-			}
-			totalMinRole += role.Min
-			totalMaxRole += role.Max
-		}
-		if totalMaxRole == 0 {
-			return ValidationErrorZeroTotalMaxRole
-		}
-		if totalMinRole > playerMaxNumber {
-			return ValidationErrorTotalMinRole
-		}
-		if totalMaxRole < playerMinNumber {
-			return ValidationErrorTotalMaxRole
-		}
-	}
-	return nil
-}
-
-func isDifferent(rolesA, rolesB []Role) bool {
-	if len(rolesA) != len(rolesB) {
-		return true
-	}
-	for _, roleA := range rolesA {
-		var equal bool
-		for _, roleB := range rolesB {
-			if roleA == roleB {
-				equal = true
-				break
-			}
-		}
-		if !equal {
-			return true
-		}
-	}
-	return false
 }
 
 type AllianceComposition struct {

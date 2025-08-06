@@ -23,11 +23,6 @@ func applyAllianceFlexingRules(ruleset models.RuleSet, pivotTime time.Time) (mod
 	isFlexed := false
 	ruleset.AllianceRule, isFlexed = ApplyAllianceFlexingRule(ruleset.AllianceRule, ruleset.AllianceFlexingRule, pivotTime)
 
-	for subGameModeName, subGameMode := range ruleset.SubGameModes {
-		subGameMode.AllianceRule, isFlexed = ApplyAllianceFlexingRule(subGameMode.AllianceRule, subGameMode.AllianceFlexingRule, pivotTime)
-		ruleset.SubGameModes[subGameModeName] = subGameMode
-	}
-
 	return ruleset, isFlexed
 }
 
@@ -49,13 +44,6 @@ func ApplyAllianceFlexingRule(allianceRule models.AllianceRule, allianceFlexingR
 			allianceRule.MinNumber = flexRule.MinNumber
 			allianceRule.PlayerMaxNumber = flexRule.PlayerMaxNumber
 			allianceRule.PlayerMinNumber = flexRule.PlayerMinNumber
-
-			if allianceRule.Combination.HasCombination && flexRule.Combination.HasCombination {
-				// copy alliances combination only, because role flexing config still used main rule
-				allianceRule.Combination.Alliances = flexRule.Combination.Alliances
-			} else {
-				allianceRule.Combination = flexRule.Combination
-			}
 			isFlexed = true
 		}
 	}

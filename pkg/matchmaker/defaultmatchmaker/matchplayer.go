@@ -181,8 +181,6 @@ regionloop:
 		var mmResults []*models.MatchmakingResult
 		var matchingAllies []models.MatchingAlly
 
-		var selectedSubGamemodes []interface{}
-
 		{
 			matchingAllies, _ = findMatchingAlly(
 				scope,
@@ -375,11 +373,6 @@ regionloop:
 				}
 			}
 
-			// put selected subgamemodes in the session's attribute
-			if len(selectedSubGamemodes) > 0 {
-				attributes[models.AttributeSubGameMode] = selectedSubGamemodes
-			}
-
 			// kept original attributes, set to single value if the original is not an array
 			for key, value := range attributes {
 				if isMulti, exists := isMultiOptions[key]; exists && !isMulti {
@@ -518,11 +511,6 @@ func findMatchingAlly(
 
 	// set up reorder tool
 	maxLoop := 1
-	if allianceRule.HasCombination {
-		// role-based need more loop to test out combination for each roles
-		// but can be overwritten by config FindAllyMaxLoop
-		maxLoop = allianceRule.MaxNumber * allianceRule.PlayerMaxNumber
-	}
 	if config != nil && config.FindAllyMaxLoop > 0 {
 		maxLoop = config.FindAllyMaxLoop
 	}
@@ -679,7 +667,6 @@ func FindPartyCombination(
 		newIndexes := r.Get()
 		tickets := reorderTickets(sourceTickets, newIndexes)
 
-		// start assigning role with new combination in each loop
 		pf.Reset()
 		for _, ticket := range tickets {
 			/*

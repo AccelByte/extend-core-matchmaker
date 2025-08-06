@@ -43,6 +43,8 @@ func (b defaultMatchMaker) ValidateTicket(scope *envelope.Scope, matchTicket mat
 	scope.Log.Info("MATCHMAKER: validate ticket")
 	scope.Log.Info("Ticket Validation successful")
 
+	// validate latency: latency must below RegionLatencyMaxMs at least one
+
 	return true, nil
 }
 

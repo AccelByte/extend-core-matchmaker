@@ -26,7 +26,6 @@ type matchTicket struct {
 func (mm *MatchMaker) SearchMatchTickets(originalRuleSet, activeRuleSet *models.RuleSet, channel *models.Channel, regionIndex int, pivot *models.MatchmakingRequest, tickets []models.MatchmakingRequest, filteredRegion []models.Region) []models.MatchmakingRequest {
 	// define filter by pivot
 	distances := getFilterByDistance(activeRuleSet, pivot.PartyAttributes)
-	subGameModes := getFilterBySubGameMode(activeRuleSet, pivot.PartyAttributes)
 	options := getFilterByMatchOption(activeRuleSet, pivot.PartyAttributes)
 	anyCrossPlay := getFilterByCrossPlay(activeRuleSet, pivot.PartyAttributes)
 	partyAttributes := getFilterByPartyAttribute(activeRuleSet, pivot.PartyAttributes)
@@ -74,12 +73,6 @@ ticketLoop:
 		}
 
 		isMatch, score := matchByDistance(ticket, originalRuleSet, distances)
-		if !isMatch {
-			continue
-		}
-		totalScore += score
-
-		isMatch, score = matchBySubGameMode(ticket, subGameModes)
 		if !isMatch {
 			continue
 		}
@@ -151,7 +144,6 @@ func (mm *MatchMaker) SearchMatchTicketsBySession(rootScope *envelope.Scope, ori
 
 	// define filter by pivot
 	distances := getFilterByDistance(activeRuleSet, session.PartyAttributes)
-	subGameModes := getFilterBySubGameMode(activeRuleSet, session.PartyAttributes)
 	options := getFilterByMatchOption(activeRuleSet, session.PartyAttributes)
 	anyCrossPlay := getFilterByCrossPlay(activeRuleSet, session.PartyAttributes)
 	partyAttributes := getFilterByPartyAttribute(activeRuleSet, session.PartyAttributes)
@@ -214,12 +206,6 @@ ticketLoop:
 		}
 
 		isMatch, score := matchByDistance(ticket, originalRuleSet, distances)
-		if !isMatch {
-			continue
-		}
-		totalScore += score
-
-		isMatch, score = matchBySubGameMode(ticket, subGameModes)
 		if !isMatch {
 			continue
 		}
@@ -396,68 +382,6 @@ func matchByDistance(ticket *models.MatchmakingRequest, originalRuleSet *models.
 		}
 	}
 	return true, score
-}
-
-type subGameMode struct {
-	name string
-}
-
-func getFilterBySubGameMode(activeRuleSet *models.RuleSet, partyAttributes map[string]interface{}) []subGameMode {
-	gameModeMap := make(map[string]struct{})
-	for _, subGameMode := range activeRuleSet.SubGameModes {
-		gameModeMap[subGameMode.Name] = struct{}{}
-	}
-	subGameModeAttributes, ok := partyAttributes[models.AttributeSubGameMode]
-	if !ok {
-		return nil
-	}
-	subGameModeNames, ok := subGameModeAttributes.([]interface{})
-	if !ok {
-		subGameModeNames = append(subGameModeNames, subGameModeAttributes)
-	}
-	subGameModes := make([]subGameMode, 0)
-	for _, v := range subGameModeNames {
-		name, ok := v.(string)
-		if !ok {
-			continue
-		}
-		if _, ok = gameModeMap[name]; !ok {
-			continue
-		}
-		subGameModes = append(subGameModes, subGameMode{name: name})
-	}
-	return subGameModes
-}
-
-func matchBySubGameMode(ticket *models.MatchmakingRequest, subGameModes []subGameMode) (isMatch bool, score float64) {
-	if len(subGameModes) == 0 {
-		return true, 0.0
-	}
-	subGameModeAttributes, ok := ticket.PartyAttributes[models.AttributeSubGameMode]
-	if !ok {
-		return false, 0.0
-	}
-	subGameModeNames, ok := subGameModeAttributes.([]interface{})
-	if !ok {
-		subGameModeNames = append(subGameModeNames, subGameModeAttributes)
-	}
-	ticketSubGameMode := make(map[string]struct{})
-	for _, v := range subGameModeNames {
-		name, ok := v.(string)
-		if !ok {
-			continue
-		}
-		ticketSubGameMode[name] = struct{}{}
-	}
-	var match int
-	for _, subGameMode := range subGameModes {
-		if _, ok := ticketSubGameMode[subGameMode.name]; ok {
-			isMatch = true
-			match++
-		}
-	}
-	score = float64(len(subGameModes) - match)
-	return isMatch, score
 }
 
 type option struct {
