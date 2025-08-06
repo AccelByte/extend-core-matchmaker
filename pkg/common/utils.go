@@ -6,14 +6,10 @@ package common
 
 import (
 	"encoding/json"
-	"fmt"
 	"math/rand"
 	"os"
 	"strconv"
-	"strings"
 	"time"
-
-	"github.com/google/uuid"
 
 	"github.com/sirupsen/logrus"
 )
@@ -44,18 +40,6 @@ func GenerateRandomInt() int {
 	return random.Intn(10000)
 }
 
-// MakeTraceID create new traceID
-// example: service_1234
-func MakeTraceID(identifiers ...string) string {
-	strInt := strconv.Itoa(GenerateRandomInt())
-	var tID string
-	for _, i := range identifiers {
-		tID = fmt.Sprintf(tID + i + "_")
-	}
-
-	return fmt.Sprintf(tID + strInt)
-}
-
 // LogJSONFormatter is printing the data in log
 func LogJSONFormatter(data interface{}) string {
 	response, err := json.Marshal(data)
@@ -68,10 +52,4 @@ func LogJSONFormatter(data interface{}) string {
 
 		return string(response)
 	}
-}
-
-func getUUID() string {
-	id := uuid.New()
-
-	return strings.Replace(id.String(), "-", "", -1)
 }

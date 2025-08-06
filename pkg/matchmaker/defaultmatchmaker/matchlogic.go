@@ -146,9 +146,6 @@ func (b defaultMatchMaker) MakeMatches(rootScope *envelope.Scope, ticketProvider
 			requestValues := requests
 			sourceTickets := tickets
 
-			// Add metrics for monitoring
-			b.addToPartiesRegionInMatchQueueMetrics(scope, requestValues, sourceTickets, channel)
-
 			// Run matchmaking in a separate goroutine
 			go b.runMatchMaking(scope, requestValues, results, &wg, channel, channel.Ruleset, sourceTickets)
 		}
@@ -662,36 +659,6 @@ func fromMatchResultToBackfillProposal(result *models.MatchmakingResult, satisfi
 		MatchPool:        result.Channel,
 		Attribute:        result.PartyAttributes,
 		MatchSessionID:   result.MatchSessionID,
-	}
-}
-
-// addToPartiesRegionInMatchQueueMetrics adds metrics for monitoring parties in match queue by region.
-// This function tracks the distribution of parties across different regions for analytics.
-func (b defaultMatchMaker) addToPartiesRegionInMatchQueueMetrics(rootScope *envelope.Scope, requests []models.MatchmakingRequest,
-	sourceTickets []matchmaker.Ticket, channel models.Channel,
-) {
-	scope := rootScope.NewChildScope("defaultMatchMaker.addToPartiesRegionInMatchQueueMetrics")
-	defer scope.Finish()
-
-	remainingRegionStats := make(map[string]map[int]int)
-	for _, request := range requests {
-		if len(request.SortedLatency) > 0 {
-			for _, latency := range request.SortedLatency {
-				stats := remainingRegionStats[latency.Region]
-				if stats == nil {
-					stats = make(map[int]int)
-				}
-				stats[request.CountPlayer()]++
-				remainingRegionStats[latency.Region] = stats
-			}
-		} else {
-			stats := remainingRegionStats["empty-region"]
-			if stats == nil {
-				stats = make(map[int]int)
-			}
-			stats[request.CountPlayer()]++
-			remainingRegionStats["empty-region"] = stats
-		}
 	}
 }
 
