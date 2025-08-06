@@ -6,6 +6,8 @@ package defaultmatchmaker
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -43,7 +45,23 @@ func (b defaultMatchMaker) ValidateTicket(scope *envelope.Scope, matchTicket mat
 	scope.Log.Info("MATCHMAKER: validate ticket")
 	scope.Log.Info("Ticket Validation successful")
 
-	// validate latency: latency must below RegionLatencyMaxMs at least one
+	ruleSet, ok := matchRules.(models.RuleSet)
+	if !ok {
+		scope.Log.WithField("RuleSet", fmt.Sprintf("%T", matchRules)).Error("invalid RuleSet type")
+		return false, errors.New("invalid ruleset")
+	}
+
+	hasValidLatency := false
+	for _, latency := range matchTicket.Latencies {
+		if latency <= int64(ruleSet.RegionLatencyMaxMs) {
+			hasValidLatency = true
+			break
+		}
+	}
+
+	if !hasValidLatency {
+		return false, errors.New("no region latency below max")
+	}
 
 	return true, nil
 }
@@ -51,14 +69,6 @@ func (b defaultMatchMaker) ValidateTicket(scope *envelope.Scope, matchTicket mat
 // EnrichTicket is responsible for adding logic to the match ticket before match making
 func (b defaultMatchMaker) EnrichTicket(scope *envelope.Scope, matchTicket matchmaker.Ticket, ruleSet interface{}) (ticket matchmaker.Ticket, err error) {
 	scope.Log.Info("MATCHMAKER: enrich ticket")
-	if len(matchTicket.TicketAttributes) == 0 {
-		scope.Log.Info("MATCHMAKER: ticket attributes are empty, lets add some!")
-		enrichMap := map[string]interface{}{
-			"enrichedNumber": float64(20),
-		}
-		matchTicket.TicketAttributes = enrichMap
-		scope.Log.Infof("EnrichedTicket Attributes: %+v", matchTicket.TicketAttributes)
-	}
 
 	return matchTicket, nil
 }
