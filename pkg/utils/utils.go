@@ -58,23 +58,3 @@ func HasSameElement(s1, s2 []string) bool {
 	}
 	return true
 }
-
-func IntersectionOfStringLists(stringLists ...[]string) []string {
-	neededCount := len(stringLists)
-	countMap := make(map[string]int)
-	intersection := make([]string, 0)
-	for _, stringList := range stringLists {
-		seenStringAlreadyInThisList := make(map[string]struct{})
-		for _, str := range stringList {
-			if _, yes := seenStringAlreadyInThisList[str]; yes {
-				continue
-			}
-			seenStringAlreadyInThisList[str] = struct{}{}
-			countMap[str] += 1
-			if countMap[str] == neededCount {
-				intersection = append(intersection, str)
-			}
-		}
-	}
-	return intersection
-}
