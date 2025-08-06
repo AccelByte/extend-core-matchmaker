@@ -61,13 +61,6 @@ func (f *normal) AssignMembers(ticket models.MatchmakingRequest) (success bool) 
 	currPlayerCount := countPlayers(f.result)
 	addPlayerCount := currPlayerCount + len(ticket.PartyMembers)
 
-	// Skip this ticket if player count will exceed max
-	// if addPlayerCount > f.maxPlayer {
-	// 	return false
-	// }
-
-	// return true
-
 	return addPlayerCount <= f.maxPlayer
 }
 
