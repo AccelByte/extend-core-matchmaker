@@ -1,0 +1,508 @@
+// Copyright (c) 2025 AccelByte Inc. All Rights Reserved.
+// This is licensed software from AccelByte Inc, for limitations
+// and restrictions contact your company contract manager.
+
+// Package defaultmatchmaker provides the default implementation of the MatchLogic interface.
+// This package contains the core matchmaking algorithms and logic for creating matches from tickets.
+package defaultmatchmaker
+
+import (
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/AccelByte/extend-core-matchmaker/pkg/constants"
+	"github.com/AccelByte/extend-core-matchmaker/pkg/envelope"
+	"github.com/AccelByte/extend-core-matchmaker/pkg/models"
+)
+
+// while adding ticket to a session, we should check the mmr balance
+
+// MatchSessions attempts to add additional players to existing game sessions.
+// This method handles backfill scenarios where existing sessions need more players.
+//
+//nolint:gocyclo
+func (mm *MatchMaker) MatchSessions(rootScope *envelope.Scope, namespace string, matchPool string, tickets []models.MatchmakingRequest, sessions []*models.MatchmakingResult, channel models.Channel) (updatedSessions []*models.MatchmakingResult, satisfiedSessions []*models.MatchmakingResult, satisfiedTickets []models.MatchmakingRequest, err error) {
+	scope := rootScope.NewChildScope("Matchmaker.MatchSessions")
+	defer scope.Finish()
+
+	// Early return if no tickets or sessions to process
+	if len(tickets) == 0 || len(sessions) == 0 {
+		return nil, nil, nil, nil
+	}
+
+	// Set up timeout safeguard for pool lock
+	startTime := time.Now()
+	timeLimit := (constants.PoolLockTimeLimit * 2) / 5
+	if mm.cfg != nil && mm.cfg.MatchTimeLimitSecond > 0 {
+		timeLimit = time.Duration(mm.cfg.MatchTimeLimitSecond) * time.Second
+	}
+	satisfiedTickets = make([]models.MatchmakingRequest, 0)
+	updatedSessions = make([]*models.MatchmakingResult, 0)
+	satisfiedSessions = make([]*models.MatchmakingResult, 0)
+
+	// Prioritize requests with more players if configured
+	if mm.cfg != nil && mm.cfg.PrioritizeLargerParties {
+		sortDESC(tickets)
+	}
+
+	// Process each session to find suitable tickets
+allsession:
+	for _, session := range sessions {
+		// Determine if rule needs flexing based on session state
+		activeRuleset, _ := applyRuleFlexingForSession(*session, channel.Ruleset)
+		activeRuleset, _ = applyAllianceFlexingRulesForSession(*session, activeRuleset)
+		scope.Log.WithField("ruleset", activeRuleset).Debug("ruleset applied")
+
+		// Search for matching tickets for this session
+		// [MANUALSEARCH]
+		result := mm.SearchMatchTicketsBySession(scope, &channel.Ruleset, &activeRuleset, &channel, *session, tickets)
+
+	tickethitloop:
+
+		// Process each candidate ticket for this session
+		// [MANUALSEARCH]
+		for resultIndex := range result {
+			candidateTicket := &result[resultIndex]
+
+			// Check if still have time to try
+			elapsed := time.Since(startTime)
+			if elapsed >= timeLimit {
+				break allsession
+			}
+
+			// Prevent duplicate userid match into same session
+			sessionUserIDs := session.GetMapUserIDs()
+			for _, member := range candidateTicket.PartyMembers {
+				if _, exist := sessionUserIDs[member.UserID]; exist {
+					continue tickethitloop
+				}
+			}
+
+			// Validate region latency in 3 steps:
+			sessionRegion := strings.TrimSpace(session.Region)
+			if sessionRegion != "" {
+				// Just to re-ensure candidate ticket's region is same with session region
+				filteredRegions := filterRegionByStep(candidateTicket, &channel)
+				var isRegionMatch bool
+				for _, region := range filteredRegions {
+					if region.Region == session.Region {
+						isRegionMatch = true
+						break
+					}
+				}
+				// Skip ticket if somehow its not match
+				if !isRegionMatch {
+					scope.Log.WithField("match_id", session.MatchID).
+						WithField("channel", session.Channel).
+						WithField("candidate_party_id", candidateTicket.PartyID).
+						Warn("region is not match")
+
+					continue
+				}
+			} else {
+				// If session region is empty just log warn
+				scope.Log.WithField("match_id", session.MatchID).
+					WithField("channel", session.Channel).
+					Warn("session region is empty")
+			}
+
+			// Update list of blocked player in session
+			toBeUpdated := make([]*models.MatchmakingResult, 0, len(updatedSessions)+len(satisfiedSessions))
+			toBeUpdated = append(toBeUpdated, satisfiedSessions...)
+			toBeUpdated = append(toBeUpdated, updatedSessions...)
+			for _, tbu := range toBeUpdated {
+				updateBlockedPlayerInSession(tbu)
+			}
+
+			/*
+				[AR-7033] skip checking blocked players for:
+				- respect block only for the same team
+				- don't respect block
+			*/
+			if channel.Ruleset.BlockedPlayerOption == "" ||
+				channel.Ruleset.BlockedPlayerOption == models.BlockedPlayerCannotMatch {
+				// Check if any players in session is blocked by anyone in the ticket (use ticket's PartyAttribute root level)
+				for _, blockedUserID := range candidateTicket.GetBlockedPlayerUserIDs() {
+					for _, userID := range session.GetMemberUserIDs() {
+						if userID == blockedUserID {
+							continue tickethitloop
+						}
+					}
+				}
+
+				// Check if any players in ticket is blocked by anyone in the session (use session's PartyAttribute root level)
+				for _, blockedUserID := range session.GetBlockedPlayerUserIDs() {
+					for _, userID := range candidateTicket.GetMemberUserIDs() {
+						if userID == blockedUserID {
+							continue tickethitloop
+						}
+					}
+				}
+			}
+
+			// Filter based on optional match, skip if does not make sense
+			optionValuesMap := make(map[string]map[interface{}]int)
+			ruleOptions := make(map[string]models.MatchOption)
+			isMultiOptions := make(map[string]bool)
+			selectedOptions := make(map[string][]interface{})
+			replaceOptions := make(map[string]bool)
+
+			// Count the number of times the options and its values are found in session's combined party attributes
+			for _, option := range activeRuleset.MatchOptions.Options {
+				ruleOptions[option.Name] = option
+
+				// Include the session's attribute in options count
+				if v, o := session.PartyAttributes[option.Name]; o {
+					if optionValuesMap[option.Name] == nil {
+						optionValuesMap[option.Name] = make(map[interface{}]int)
+					}
+
+					multival, ok := v.([]interface{})
+					isMultiOptions[option.Name] = ok
+					if !ok {
+						// Handle single value
+						optionValuesMap[option.Name][v]++
+					} else {
+						for _, val := range multival {
+							optionValuesMap[option.Name][val]++
+						}
+					}
+				}
+
+				// Read candidate ticket's attribute
+				if v, o := candidateTicket.PartyAttributes[option.Name]; o {
+					if optionValuesMap[option.Name] == nil {
+						optionValuesMap[option.Name] = make(map[interface{}]int)
+					}
+
+					multival, ok := v.([]interface{})
+					if !ok {
+						// Handle single value
+						optionValuesMap[option.Name][v]++
+					} else {
+						for _, val := range multival {
+							optionValuesMap[option.Name][val]++
+						}
+					}
+				}
+			}
+
+			// Process match options based on their type for session matching
+			for name, option := range optionValuesMap {
+				switch ruleOptions[name].Type {
+				case models.MatchOptionTypeAll:
+					// Fail if any party in the session does not have all options
+					for val, count := range option {
+						if count < 2 { // Must match the ticket and the session = 2
+							continue tickethitloop
+						}
+						selectedOptions[name] = append(selectedOptions[name], val)
+					}
+				case models.MatchOptionTypeAny:
+					// Fail if cannot find common option
+					for val, count := range option {
+						if count > 1 {
+							selectedOptions[name] = append(selectedOptions[name], val)
+						}
+					}
+
+					if mm.isMatchAnyCommon {
+						// Replace with all parties common value
+						replaceOptions[name] = true
+					}
+
+					if len(selectedOptions) == 0 {
+						continue tickethitloop
+					}
+				case models.MatchOptionTypeUnique:
+					// Fail if there's any common option
+					for val, count := range option {
+						if count > 1 {
+							continue tickethitloop
+						}
+						selectedOptions[name] = append(selectedOptions[name], val)
+					}
+				}
+			}
+
+			// Find proper alliance for ticket
+			teamCount := len(session.MatchingAllies)
+			playerPerTeamCount := make([]int, teamCount)
+			originalSessionPlayerCount := 0
+			ticketPlayerCount := len(candidateTicket.PartyMembers)
+			{
+				// Try for all possible subgamemode
+				var allianceRules []models.AllianceRule
+
+				allianceRules = append(allianceRules, activeRuleset.AllianceRule)
+
+				found := false
+
+				for _, allianceRule := range allianceRules {
+					for allyIndex, ally := range session.MatchingAllies {
+						playerPerTeamCount[allyIndex] = ally.CountPlayer()
+						originalSessionPlayerCount += ally.CountPlayer()
+					}
+
+				findMatchingAlly:
+					// Store allies index sorted by player count
+					sortedIndex := make([]int, 0, len(session.MatchingAllies))
+					for allyIndex := range session.MatchingAllies {
+						sortedIndex = append(sortedIndex, allyIndex)
+					}
+					sort.Slice(sortedIndex, func(i, j int) bool {
+						return session.MatchingAllies[sortedIndex[i]].CountPlayer() < session.MatchingAllies[sortedIndex[j]].CountPlayer()
+					})
+
+					// Try to add ticket to existing allies, starting with the smallest
+					for _, allyIndex := range sortedIndex {
+						ally := session.MatchingAllies[allyIndex]
+						// Prepare PartyFinder params
+						minPlayer := allianceRule.PlayerMinNumber
+						maxPlayer := allianceRule.PlayerMaxNumber
+						current := []models.MatchmakingRequest{
+							// PartyFinder only need the party members to find a party
+							{PartyMembers: ally.GetMembers()},
+						}
+
+						// Use PartyFinder to assign members
+						pf := GetPartyFinder(minPlayer, maxPlayer, current)
+						/*
+							[AR-7033] check blocked players for:
+							- respect block only for the same team
+						*/
+						if channel.Ruleset.BlockedPlayerOption == models.BlockedPlayerCanMatchOnDifferentTeam &&
+							isContainBlockedPlayers(pf.GetCurrentResult(), candidateTicket) {
+							continue
+						}
+						success := pf.AssignMembers(*candidateTicket)
+						if !success {
+							continue
+						}
+						pf.AppendResult(*candidateTicket)
+						for _, res := range pf.GetCurrentResult() {
+							if res.PartyID == candidateTicket.PartyID {
+								// To copy all member's extra attributes
+								candidateTicket.PartyMembers = res.PartyMembers
+								break
+							}
+						}
+
+						found = true
+						session.MatchingAllies[allyIndex].MatchingParties = append(session.MatchingAllies[allyIndex].MatchingParties, createMatchingParty(candidateTicket))
+						playerPerTeamCount[allyIndex] += ticketPlayerCount
+						break
+					}
+
+					if found {
+						break
+					}
+
+					// Try creating a new alliance if we haven't reached the maximum
+					if len(session.MatchingAllies) < allianceRule.MaxNumber {
+						session.MatchingAllies = append(session.MatchingAllies, models.MatchingAlly{
+							MatchingParties: []models.MatchingParty{},
+						})
+						teamCount++
+						playerPerTeamCount = append(playerPerTeamCount, 0)
+						goto findMatchingAlly
+					}
+
+					if found {
+						break
+					}
+				}
+
+				// Clean up empty matching parties
+				session.MatchingAllies = RemoveEmptyMatchingParties(session.MatchingAllies)
+
+				if !found {
+					continue
+				}
+			} // Find ally end
+
+			// Update combined party attributes
+			{
+				// Update match options, insert new if any
+				for key, values := range selectedOptions {
+					if _, ok := session.PartyAttributes[key]; !ok {
+						session.PartyAttributes[key] = values
+					} else {
+						if replaceOptions[key] {
+							session.PartyAttributes[key] = values
+						} else if attr, k := session.PartyAttributes[key]; k {
+							if arr, isArr := attr.([]interface{}); isArr {
+							optionvaluesloop:
+								for _, v := range values {
+									for _, item := range arr {
+										if v == item {
+											continue optionvaluesloop
+										}
+									}
+									arr = append(arr, v)
+								}
+								session.PartyAttributes[key] = arr
+							} else {
+								session.PartyAttributes[key] = values
+							}
+						} else {
+							session.PartyAttributes[key] = values
+						}
+					}
+				}
+
+				// Keep original attributes, set to single value if the original is not an array
+				for key, value := range session.PartyAttributes {
+					if isMulti, exists := isMultiOptions[key]; exists && !isMulti {
+						if values, ok := value.([]interface{}); ok {
+							if len(values) == 1 {
+								session.PartyAttributes[key] = values[0]
+							}
+						}
+					}
+				}
+
+				// Update member attributes by calculating weighted averages
+				sessionMemberAttributes, ok := session.PartyAttributes[memberAttributesKey].(map[string]interface{})
+				if !ok {
+					sessionMemberAttributes = make(map[string]interface{})
+				}
+				ticketMemberAttributes, ok := candidateTicket.PartyAttributes[memberAttributesKey].(map[string]interface{})
+				if !ok {
+					ticketMemberAttributes = make(map[string]interface{})
+				}
+				for _, rule := range activeRuleset.MatchingRule {
+					if rule.Criteria == distanceCriteria {
+						currentAvg, ok := sessionMemberAttributes[rule.Attribute].(float64)
+						if !ok {
+							currentAvg = 0
+						}
+						ticketAvg, ok := ticketMemberAttributes[rule.Attribute].(float64)
+						if !ok {
+							ticketAvg = 0
+						}
+						// Calculate weighted average based on player counts
+						newAvg := (float64(originalSessionPlayerCount)*currentAvg + float64(ticketPlayerCount)*ticketAvg) / (float64(originalSessionPlayerCount) + float64(ticketPlayerCount))
+						sessionMemberAttributes[rule.Attribute] = newAvg
+					}
+				}
+				session.PartyAttributes[memberAttributesKey] = sessionMemberAttributes
+
+			}
+
+			// Check if session is full, remove from session list to avoid adding more players
+			{
+				var allianceRules []models.AllianceRule
+				allianceRules = append(allianceRules, activeRuleset.AllianceRule)
+
+				// Append ticket to satisfiedTickets
+				satisfiedTickets = append(satisfiedTickets, *candidateTicket)
+
+				tickets = removeMatchmakingRequest(candidateTicket.PartyID, tickets)
+
+				full := false
+				for _, allianceRule := range allianceRules {
+					if teamCount == allianceRule.MaxNumber {
+						full = true
+						for teamIndex := 0; teamIndex < teamCount; teamIndex++ {
+							if playerPerTeamCount[teamIndex] < allianceRule.PlayerMaxNumber {
+								full = false
+								break
+							}
+						}
+					}
+
+					if !full {
+						break
+					}
+				}
+
+				if full {
+					// Remove session from the sessions list
+					id := -1
+					for j, s := range sessions {
+						if s.MatchID == session.MatchID {
+							id = j
+							break
+						}
+					}
+
+					if id > -1 {
+						sessions = append(sessions[0:id], sessions[id+1:]...)
+					}
+
+					// Put session in list of satisfied sessions
+					found := false
+					for _, v := range satisfiedSessions {
+						if v.MatchID == session.MatchID {
+							found = true
+							break
+						}
+					}
+
+					if !found {
+						satisfiedSessions = append(satisfiedSessions, session)
+					}
+
+					// Remove from updated session if any
+					id = -1
+					for k, v := range updatedSessions {
+						if v.MatchID == session.MatchID {
+							id = k
+							break
+						}
+					}
+
+					if id > -1 {
+						updatedSessions = append(updatedSessions[0:id], updatedSessions[id+1:]...)
+					}
+
+					continue allsession
+				} else {
+					// Put session in list of updated sessions
+					found := false
+					for _, v := range updatedSessions {
+						if v.MatchID == session.MatchID {
+							found = true
+							break
+						}
+					}
+
+					if !found {
+						updatedSessions = append(updatedSessions, session)
+					}
+					updateBlockedPlayerInSession(session)
+				}
+			} // Remove full session end
+		} // Query hits loop end
+		// } // Session's regions loop end
+	} // Sessions loop end
+
+	// [REBALANCE_BACKFILL][Unsupported]
+
+	return updatedSessions, satisfiedSessions, satisfiedTickets, nil
+}
+
+// updateBlockedPlayerInSession consolidates blocked player information from all parties in a session.
+// This function collects blocked player lists from all parties and combines them into the session's party attributes.
+func updateBlockedPlayerInSession(session *models.MatchmakingResult) {
+	blockedPlayers := make([]interface{}, 0)
+	for _, ally := range session.MatchingAllies {
+		for _, party := range ally.MatchingParties {
+			blockedPlayersInterface, ok := party.PartyAttributes[models.AttributeBlocked]
+			if !ok {
+				continue
+			}
+			blockedPlayersArr, okArr := blockedPlayersInterface.([]interface{})
+			if !okArr {
+				continue
+			}
+			blockedPlayers = append(blockedPlayers, blockedPlayersArr...)
+		}
+	}
+	if session.PartyAttributes == nil {
+		session.PartyAttributes = make(map[string]interface{})
+	}
+	session.PartyAttributes[models.AttributeBlocked] = blockedPlayers
+}

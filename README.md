@@ -202,15 +202,23 @@ This app can be tested locally using [Postman](https://www.postman.com/).
 
 4. Proceed by first sending parameters to specify the number of players in a match. Copy the sample `json` below. Then, click **Send**.
 
-   ```json
-   {
-       "parameters": {
-           "rules": {
-               "json": "{\"shipCountMin\":1, \"shipCountMax\":2}"
-           }
+      ```json
+       {
+           "alliance": {
+               "min_number": 2,
+               "max_number": 2,
+               "player_min_number": 1,
+               "player_max_number": 1
+           },
+           "matching_rule": [],
+           "flexing_rule": [],
+           "match_options": {},
+           "region_expansion_rate_ms": 5000,
+           "region_expansion_range_ms": 50,
+           "region_latency_initial_range_ms": 100,
+           "region_latency_max_ms": 1000
        }
-   }
-   ```
+      ```
 
 5. Now, send the match ticket to start matchmaking. Copy the sample `json` below and replace it into the Postman message. Then, click **Send**. Repeat this step until the number of players is met and a match can be created. In this case, it is two players.
 
