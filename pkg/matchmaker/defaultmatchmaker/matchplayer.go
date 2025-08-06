@@ -118,13 +118,13 @@ pivotMatching:
 	scope.Log.Debugf("executing %d requests on local pool", len(matchmakingRequests))
 	scope.Log.WithField("matchmakingRequests", matchmakingRequests).Debug("incoming requests")
 
-	// sort the ticket before choosing a pivot, so the pivot ticket is always the oldest
+	// Sort the ticket before choosing a pivot, so the pivot ticket is always the oldest
 	sortOldestFirst(matchmakingRequests)
 
 	pivotRequest := matchmakingRequests[0]
 	pivotTimeStampRequest := time.Unix(pivotRequest.CreatedAt, 0)
 
-	// determine if rule needs flexing
+	// Determine if rule needs flexing based on pivot ticket age
 	activeRulesetBefore, _ := applyRuleFlexing(ruleset, pivotTimeStampRequest)
 	activeRuleset, _ := applyAllianceFlexingRules(activeRulesetBefore, pivotTimeStampRequest)
 
@@ -132,7 +132,7 @@ pivotMatching:
 
 	allianceComposition = DetermineAllianceComposition(activeRuleset)
 
-	// determine how many regions should this request be matchmaked based on
+	// Determine how many regions should this request be matchmaked based on
 	// number of regions in the request and attempt count
 	filteredRegion := filterRegionByStep(&pivotRequest, &channel)
 	regionsToTry := len(filteredRegion)
@@ -142,18 +142,19 @@ pivotMatching:
 
 regionloop:
 	for regionIndex := 0; regionIndex < regionsToTry; regionIndex++ {
-		// make sure pivot request is usable
+		// Make sure pivot request is usable
 		if len(pivotRequest.PartyMembers) == 0 {
 			break
 		}
 
+		// Search for matching tickets using manual search algorithm
 		// [MANUALSEARCH]
 		result := mm.SearchMatchTickets(&ruleset, &activeRuleset, &channel, regionIndex, &pivotRequest, matchmakingRequests, filteredRegion)
 
 		var mmRequests []models.MatchmakingRequest
 		playerCount = 0
 
-		// insert the pivot request
+		// Insert the pivot request as the first candidate
 		req := getMatchmakingRequest(pivotRequest.PartyID, matchmakingRequests)
 		if req == nil {
 			continue
@@ -161,6 +162,7 @@ regionloop:
 		mmRequests = append(mmRequests, *req)
 		playerCount += len(req.PartyMembers)
 
+		// Add all matching candidates to the request list
 		for resultIndex := range result {
 			// [MANUALSEARCH]
 			req = &result[resultIndex]
@@ -175,22 +177,22 @@ regionloop:
 
 		scope.Log.WithField("matching_candidates_number", len(mmRequests)).WithField("matching_candidates", mmRequests).Debug("matching candidates found")
 
-		// don't bother finding ally if number of tickets cannot form minimum teams
+		// Don't bother finding ally if number of tickets cannot form minimum teams
 		if len(mmRequests) < allianceComposition.MinTeam {
 			continue
 		}
 
-		// don't bother finding ally if number of matched players is less than minimum needed
+		// Don't bother finding ally if number of matched players is less than minimum needed
 		if playerCount < allianceComposition.MinTotalPlayer() {
 			continue
 		}
 
-		// prioritize request with more players
+		// Prioritize request with more players if configured
 		if mm.cfg != nil && mm.cfg.PrioritizeLargerParties {
 			sortDESC(mmRequests)
 		}
 
-		// ally finding
+		// Ally finding - attempt to create teams from the matching candidates
 		var mmResults []*models.MatchmakingResult
 		var matchingAllies []models.MatchingAlly
 
@@ -208,24 +210,25 @@ regionloop:
 			findMatchingAllyCounter++
 		}
 
+		// If we found enough allies to form a match
 		if len(matchingAllies) >= allianceComposition.MinTeam {
 			channelSlug := pivotRequest.Channel
 			serverName, _ := pivotRequest.PartyAttributes[models.AttributeServerName].(string)
 			clientVersion, _ := pivotRequest.PartyAttributes[models.AttributeClientVersion].(string)
 
-			// get the matched region (if any)
+			// Get the matched region (if any)
 			region := ""
 			if len(pivotRequest.SortedLatency) > 0 && regionIndex < len(pivotRequest.SortedLatency) {
 				region = pivotRequest.SortedLatency[regionIndex].Region
 			}
 
-			// filter based on optional match, skip if does not make sense
+			// Filter based on optional match, skip if does not make sense
 			optionValuesMap := make(map[string]map[interface{}]int)
 			ruleOptions := make(map[string]models.MatchOption)
 			isMultiOptions := make(map[string]bool)
 			selectedOptions := make(map[string][]interface{})
 
-			// count the number of times the options and its values are found in each ticket
+			// Count the number of times the options and its values are found in each ticket
 			for _, option := range activeRuleset.MatchOptions.Options {
 				ruleOptions[option.Name] = option
 
@@ -239,7 +242,7 @@ regionloop:
 							multival, ok := v.([]interface{})
 							isMultiOptions[option.Name] = ok
 							if !ok {
-								// handle single value
+								// Handle single value
 								optionValuesMap[option.Name][v]++
 								continue
 							}
@@ -251,10 +254,11 @@ regionloop:
 				}
 			}
 
+			// Process match options based on their type
 			for name, option := range optionValuesMap {
 				switch ruleOptions[name].Type {
 				case models.MatchOptionTypeAll:
-					// fail if any party in the session does not have all options
+					// Fail if any party in the session does not have all options
 					partyCount := 0
 					for _, ally := range matchingAllies {
 						partyCount += len(ally.MatchingParties)
@@ -272,16 +276,16 @@ regionloop:
 					}
 
 					if mm.isMatchAnyCommon {
-						// common value for all parties
+						// Common value for all parties
 						for val, count := range option {
 							if partyCount == count {
 								selectedOptions[name] = append(selectedOptions[name], val)
 							}
 						}
 					} else {
-						// fail if cannot find common option
+						// Fail if cannot find common option
 						for val, count := range option {
-							// single party(solo or coop) or multi party game with correct count
+							// Single party(solo or coop) or multi party game with correct count
 							if partyCount == 1 || count > 1 {
 								selectedOptions[name] = append(selectedOptions[name], val)
 							}
@@ -292,7 +296,7 @@ regionloop:
 						continue regionloop
 					}
 				case models.MatchOptionTypeUnique:
-					// fail if there's any common option
+					// Fail if there's any common option
 					for val, count := range option {
 						if count > 1 {
 							continue regionloop
@@ -302,17 +306,19 @@ regionloop:
 				}
 			}
 
-			attributes := make(map[string]interface{}) // store combined party attributes into session
+			// Combine party attributes into session attributes
+			attributes := make(map[string]interface{})
 
 			matchID := utils.GenerateUUID()
 
+			// Process each ally and party to build session attributes
 			for _, ally := range matchingAllies {
 				for _, party := range ally.MatchingParties {
-					// get attributes
+					// Get attributes from party
 					for key, val := range party.PartyAttributes {
-						// only put shared options in the session attributes
+						// Only put shared options in the session attributes
 						if values, ok := selectedOptions[key]; ok {
-							// make this always an array
+							// Make this always an array
 							if attr, k := attributes[key]; k {
 								if arr, isArr := attr.([]interface{}); isArr {
 								optionvaluesloop:
@@ -334,13 +340,14 @@ regionloop:
 							continue
 						}
 
-						// skip unselected option
+						// Skip unselected option
 						if _, ok := ruleOptions[key]; ok {
 							continue
 						}
 
+						// Handle special attribute keys
 						switch key {
-						// ignoring these keys
+						// Ignoring these keys
 						case models.AttributeMatchAttempt:
 						case models.AttributeLatencies:
 						case models.AttributeServerName:
@@ -348,7 +355,7 @@ regionloop:
 						case models.AttributeMemberAttr:
 						case models.AttributeSubGameMode:
 						case models.AttributeBlockedPlayersDetail:
-							// handle blocked players
+							// Handle blocked players
 						case models.AttributeBlocked:
 							ids, ok := val.([]interface{})
 							if !ok {
@@ -368,13 +375,14 @@ regionloop:
 							attributes[models.AttributeBlocked] = list
 
 						default:
-							// store these keys as "must match this attribute"
+							// Store these keys as "must match this attribute"
 							if _, ok := attributes[key]; !ok {
 								attributes[key] = val
 							}
 						}
 					}
 
+					// Add party to satisfied tickets
 					req := getMatchmakingRequest(party.PartyID, matchmakingRequests)
 					if req == nil {
 						continue
@@ -386,7 +394,7 @@ regionloop:
 				}
 			}
 
-			// kept original attributes, set to single value if the original is not an array
+			// Keep original attributes, set to single value if the original is not an array
 			for key, value := range attributes {
 				if isMulti, exists := isMultiOptions[key]; exists && !isMulti {
 					if values, ok := value.([]interface{}); ok {
@@ -397,6 +405,7 @@ regionloop:
 				}
 			}
 
+			// Create the matchmaking result
 			mmResults = append(mmResults, &models.MatchmakingResult{
 				Status:          models.MatchmakingStatusDone,
 				MatchID:         matchID,
@@ -411,21 +420,21 @@ regionloop:
 				UpdatedAt:       time.Now(),
 				PivotID:         pivotRequest.PartyID,
 			})
-
-			// needRequestRotation = false
 		}
 
+		// If we found matches, add them to batch results and continue with remaining tickets
 		if len(mmResults) != 0 {
 			batchResult = append(batchResult, mmResults...)
 			if len(matchmakingRequests) > 0 && len(matchmakingRequests) >= allianceComposition.MinTeam {
 				goto pivotMatching
 			}
 
-			// exit region loop
+			// Exit region loop
 			break
 		}
 	}
 
+	// Handle timeout and cleanup of unmatchable tickets
 	elapsed := time.Since(startTime)
 	reqLen := len(matchmakingRequests)
 	playerCount = 0
@@ -433,8 +442,8 @@ regionloop:
 		playerCount += len(mmRequest.PartyMembers)
 	}
 	if reqLen > 0 && reqLen >= allianceComposition.MinTeam && !(playerCount < allianceComposition.MinTotalPlayer() && !isUsingAllianceFlexing) && elapsed < timeLimit {
-		// remove the unmatchable ticket from the queue
-		// optimize selecting next pivot in case of unmatchable ticket found
+		// Remove the unmatchable ticket from the queue
+		// Optimize selecting next pivot in case of unmatchable ticket found
 		var removedID int
 		for i, mmRequest := range matchmakingRequests {
 			if mmRequest.PartyID == pivotRequest.PartyID {
@@ -457,6 +466,7 @@ regionloop:
 		}
 	}
 
+	// Track remaining players for metrics
 	remainingPlayers := make([]int, len(matchmakingRequests))
 	for i, req := range matchmakingRequests {
 		remainingPlayers[i] = req.CountPlayer()
@@ -465,6 +475,8 @@ regionloop:
 	return batchResult, satisfiedTickets, nil
 }
 
+// handleSinglePlayer handles matchmaking for single-player scenarios (1v1 or similar).
+// This function creates individual matches for each single player request.
 func (mm *MatchMaker) handleSinglePlayer(scope *envelope.Scope, namespace string, matchPool string, matchmakingRequests []models.MatchmakingRequest, channel models.Channel) ([]*models.MatchmakingResult, []models.MatchmakingRequest, error) {
 	mmResults := make([]*models.MatchmakingResult, 0, len(matchmakingRequests))
 	var satisfiedTickets []models.MatchmakingRequest
@@ -472,6 +484,7 @@ func (mm *MatchMaker) handleSinglePlayer(scope *envelope.Scope, namespace string
 	for _, req := range matchmakingRequests {
 		channelSlug := req.Channel
 
+		// Create a single party for this player
 		matchingParties := make([]models.MatchingParty, 0)
 		matchingParties = append(matchingParties, createMatchingParty(&req))
 		team := models.MatchingAlly{
@@ -479,14 +492,17 @@ func (mm *MatchMaker) handleSinglePlayer(scope *envelope.Scope, namespace string
 			PlayerCount:     1,
 		}
 
+		// Extract server name and client version
 		serverName, _ := req.PartyAttributes[models.AttributeServerName].(string)
 		clientVersion, _ := req.PartyAttributes[models.AttributeClientVersion].(string)
 
+		// Get region preference
 		region := ""
 		if len(req.SortedLatency) > 0 {
 			region = req.SortedLatency[0].Region
 		}
 
+		// Create matchmaking result for this single player
 		mmResults = append(mmResults, &models.MatchmakingResult{
 			Status:          models.MatchmakingStatusDone,
 			MatchID:         utils.GenerateUUID(),
@@ -506,6 +522,8 @@ func (mm *MatchMaker) handleSinglePlayer(scope *envelope.Scope, namespace string
 	return mmResults, satisfiedTickets, nil
 }
 
+// findMatchingAlly attempts to find matching allies for a pivot ticket.
+// This function uses a reordering algorithm to find optimal team combinations.
 func findMatchingAlly(
 	rootScope *envelope.Scope,
 	config *config.Config,
@@ -518,11 +536,11 @@ func findMatchingAlly(
 	scope := rootScope.NewChildScope("findMatchingAlly")
 	defer scope.Finish()
 
-	// get pivot index
+	// Get pivot index and set up reordering
 	pivotIndex := getPivotTicketIndexFromTickets(sourceTickets, &pivotTicket)
 	elementsAlwaysFirst := []int{pivotIndex}
 
-	// set up reorder tool
+	// Set up reorder tool with configuration
 	maxLoop := 1
 	if config != nil && config.FindAllyMaxLoop > 0 {
 		maxLoop = config.FindAllyMaxLoop
@@ -533,15 +551,17 @@ func findMatchingAlly(
 		ElementsAlwaysFirst: elementsAlwaysFirst,
 	})
 
+	// Try different ticket orderings to find optimal matches
 	for r.HasNext() {
 		newIndexes := r.Get()
 		tickets := reorderTickets(sourceTickets, newIndexes)
-		// use alliance rule's max for normal, all unique, & 1 combo rules
+		// Use alliance rule's max for normal, all unique, & 1 combo rules
 		maxAllyCount := allianceRule.MaxNumber
 		minAllyCount := allianceRule.MinNumber
 
 		var ticketsPerTeam [][]models.MatchmakingRequest
 
+		// Calculate minimum member number across all tickets
 		minMemberNumber := allianceRule.PlayerMaxNumber
 		for _, ticket := range tickets {
 			memberCount := len(ticket.PartyMembers)
@@ -555,7 +575,7 @@ func findMatchingAlly(
 			playerMaxNumber = minMemberNumber
 		}
 
-		// step 1: create a match with min team & min players
+		// Step 1: Create a match with min team & min players
 		for i := 0; i < minAllyCount; i++ {
 			matchedTickets := FindPartyCombination(
 				config,
@@ -573,12 +593,13 @@ func findMatchingAlly(
 
 			ticketsPerTeam = append(ticketsPerTeam, matchedTickets)
 
+			// Remove matched tickets from available pool
 			for _, reqComb := range matchedTickets {
 				tickets = removeMatchmakingRequest(reqComb.PartyID, tickets)
 			}
 		}
 
-		// step 2: fill match up to max team & max players
+		// Step 2: Fill match up to max team & max players
 		for i := 0; i < maxAllyCount; i++ {
 			var curTeamTickets []models.MatchmakingRequest
 			if i < len(ticketsPerTeam) {
@@ -605,12 +626,13 @@ func findMatchingAlly(
 				ticketsPerTeam = append(ticketsPerTeam, matchedTickets)
 			}
 
+			// Remove matched tickets from available pool
 			for _, reqComb := range matchedTickets {
 				tickets = removeMatchmakingRequest(reqComb.PartyID, tickets)
 			}
 		}
 
-		// step 3: convert matching tickets to matching allies
+		// Step 3: Convert matching tickets to matching allies
 		var teams []models.MatchingAlly
 		for _, matchedTickets := range ticketsPerTeam {
 			matchingParties := make([]models.MatchingParty, 0)
@@ -625,13 +647,13 @@ func findMatchingAlly(
 			}
 			teams = append(teams, team)
 
-			// remove selected tickets
+			// Remove selected tickets
 			for _, reqComb := range matchedTickets {
 				tickets = removeMatchmakingRequest(reqComb.PartyID, tickets)
 			}
 		}
 
-		// check if these alliances can be used to fill a session
+		// Check if these alliances can be used to fill a session
 		if err := allianceRule.ValidateAllies(teams, blockedPlayerOption); err != nil {
 			continue
 		}
@@ -641,6 +663,8 @@ func findMatchingAlly(
 	return nil, nil
 }
 
+// FindPartyCombination finds the optimal combination of parties for a team.
+// This function uses a party finder and reordering algorithm to find the best party combination.
 func FindPartyCombination(
 	config *config.Config,
 	sourceTickets []models.MatchmakingRequest,
@@ -650,10 +674,10 @@ func FindPartyCombination(
 	current []models.MatchmakingRequest,
 	blockedPlayerOption models.BlockedPlayerOption,
 ) []models.MatchmakingRequest {
-	// define the partyFinder
+	// Define the partyFinder based on player requirements
 	pf := GetPartyFinder(minPlayer, maxPlayer, current)
 
-	// get pivot index and priority indexes
+	// Get pivot index and priority indexes for reordering
 	pivotIndex := getPivotTicketIndexFromTickets(sourceTickets, &pivotTicket)
 	elementsAlwaysFirst := []int{pivotIndex}
 
@@ -665,7 +689,7 @@ func FindPartyCombination(
 		elementsAlwaysFirst = append(elementsAlwaysFirst, priorityIndex)
 	}
 
-	// set up reorder tool
+	// Set up reorder tool with configuration
 	maxLoop := 1
 	if config != nil && config.FindPartyMaxLoop > 0 {
 		maxLoop = config.FindPartyMaxLoop
@@ -676,6 +700,7 @@ func FindPartyCombination(
 		ElementsAlwaysFirst: elementsAlwaysFirst,
 	})
 
+	// Try different ticket orderings to find optimal combinations
 	for r.HasNext() {
 		newIndexes := r.Get()
 		tickets := reorderTickets(sourceTickets, newIndexes)
@@ -704,16 +729,20 @@ func FindPartyCombination(
 	return pf.GetBestResult()
 }
 
+// getMatchmakingRequest finds a matchmaking request by party ID.
+// This function returns a pointer to the request if found, nil otherwise.
 func getMatchmakingRequest(partyID string, requests []models.MatchmakingRequest) *models.MatchmakingRequest {
 	for _, req := range requests {
 		if req.PartyID == partyID {
-			req := req // for pinning
+			req := req // For pinning
 			return &req
 		}
 	}
 	return nil
 }
 
+// removeMatchmakingRequest removes a matchmaking request by party ID.
+// This function returns a new slice without the specified request.
 func removeMatchmakingRequest(partyID string, requests []models.MatchmakingRequest) []models.MatchmakingRequest {
 	var cleanMMRequest []models.MatchmakingRequest
 	for _, req := range requests {
@@ -724,6 +753,8 @@ func removeMatchmakingRequest(partyID string, requests []models.MatchmakingReque
 	return cleanMMRequest
 }
 
+// resetTicket resets ticket data from source to destination.
+// This function updates destination tickets with data from source tickets.
 func resetTicket(dest, source []models.MatchmakingRequest) {
 	for i, rt := range dest {
 		for _, t := range source {
@@ -735,8 +766,8 @@ func resetTicket(dest, source []models.MatchmakingRequest) {
 	}
 }
 
-// temporary solution to get ns from channel
-// store channel interface instead in channel cache
+// getNamespace extracts namespace from channel string.
+// Temporary solution to get namespace from channel - store channel interface instead in channel cache.
 func getNamespace(channel string) (namespace string) {
 	ch := strings.Split(channel, ":")
 	if len(ch) != 2 {
@@ -745,8 +776,8 @@ func getNamespace(channel string) (namespace string) {
 	return ch[0]
 }
 
-// temporary solution to get game mode from channel
-// store channel interface instead in channel cache
+// getGameMode extracts game mode from channel string.
+// Temporary solution to get game mode from channel - store channel interface instead in channel cache.
 func getGameMode(channel string) (gameMode string) {
 	ch := strings.Split(channel, ":")
 	if len(ch) != 2 {
@@ -755,8 +786,10 @@ func getGameMode(channel string) (gameMode string) {
 	return ch[1]
 }
 
+// createMatchingParty creates a matching party from a matchmaking request.
+// This function sanitizes the output so that internal fields are not returned.
 func createMatchingParty(ticket *models.MatchmakingRequest) models.MatchingParty {
-	// sanitize output so that internal field not returned
+	// Sanitize output so that internal field not returned
 	attr := ticket.PartyAttributes
 	delete(attr, models.AttributeMatchAttempt)
 	return models.MatchingParty{
@@ -769,13 +802,15 @@ func createMatchingParty(ticket *models.MatchmakingRequest) models.MatchingParty
 	}
 }
 
+// sortOldestFirst sorts matchmaking requests by priority (descending) and creation time (ascending).
+// This function ensures that older and higher priority tickets are processed first.
 func sortOldestFirst(requests []models.MatchmakingRequest) {
 	sort.Slice(requests, func(i, j int) bool {
-		// consider priority first (DESC)
+		// Consider priority first (DESC)
 		if requests[i].Priority != requests[j].Priority {
 			return requests[i].Priority > requests[j].Priority
 		}
-		// then, createdAt (ASC)
+		// Then, createdAt (ASC)
 		return requests[i].CreatedAt < requests[j].CreatedAt
 	})
 }

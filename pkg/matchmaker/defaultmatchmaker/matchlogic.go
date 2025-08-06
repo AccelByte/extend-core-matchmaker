@@ -110,7 +110,7 @@ func (b defaultMatchMaker) RulesFromJSON(rootScope *envelope.Scope, jsonRules st
 
 	ruleSet.SetDefaultValues()
 
-	// since we cannot store match attempt set default region expansion rate
+	// Since we cannot store match attempt, set default region expansion rate
 	if ruleSet.RegionExpansionRateMs == 0 {
 		ruleSet.RegionExpansionRateMs = 5000
 	}
@@ -118,6 +118,8 @@ func (b defaultMatchMaker) RulesFromJSON(rootScope *envelope.Scope, jsonRules st
 	return ruleSet, nil
 }
 
+// MakeMatches performs the core matchmaking logic to create new matches from available tickets.
+// This method processes tickets in chunks and runs matchmaking operations concurrently.
 func (b defaultMatchMaker) MakeMatches(rootScope *envelope.Scope, ticketProvider matchmaker.TicketProvider, matchRules interface{}) <-chan matchmaker.Match {
 	scope := rootScope.NewChildScope("defaultMatchMaker.BackfillMatches")
 	defer scope.Finish()
@@ -136,6 +138,7 @@ func (b defaultMatchMaker) MakeMatches(rootScope *envelope.Scope, ticketProvider
 			Ruleset: ruleset,
 		}
 
+		// Process tickets in chunks for better performance
 		ticketChannel := ticketProvider.GetTickets()
 		for requests, tickets := getNextNRequests(ticketChannel, b.indexedTicketLength, ruleset); len(tickets) > 0; requests, tickets = getNextNRequests(ticketChannel, b.indexedTicketLength, ruleset) {
 			wg.Add(1)
@@ -143,8 +146,10 @@ func (b defaultMatchMaker) MakeMatches(rootScope *envelope.Scope, ticketProvider
 			requestValues := requests
 			sourceTickets := tickets
 
+			// Add metrics for monitoring
 			b.addToPartiesRegionInMatchQueueMetrics(scope, requestValues, sourceTickets, channel)
 
+			// Run matchmaking in a separate goroutine
 			go b.runMatchMaking(scope, requestValues, results, &wg, channel, channel.Ruleset, sourceTickets)
 		}
 
@@ -155,6 +160,8 @@ func (b defaultMatchMaker) MakeMatches(rootScope *envelope.Scope, ticketProvider
 	return results
 }
 
+// BackfillMatches attempts to find additional players for existing matches that need more participants.
+// This method processes backfill tickets and regular tickets to fill existing sessions.
 func (b defaultMatchMaker) BackfillMatches(rootScope *envelope.Scope, ticketProvider matchmaker.TicketProvider, matchRules interface{}) <-chan matchmaker.BackfillProposal {
 	scope := rootScope.NewChildScope("defaultMatchMaker.BackfillMatches")
 	defer scope.Finish()
@@ -173,6 +180,7 @@ func (b defaultMatchMaker) BackfillMatches(rootScope *envelope.Scope, ticketProv
 			Ruleset: ruleset,
 		}
 
+		// Process both backfill tickets and regular tickets
 		backfillTicketChannel := ticketProvider.GetBackfillTickets()
 		ticketChannel := ticketProvider.GetTickets()
 		for requests, sessions, tickets := getNextNBackfillRequests(scope, backfillTicketChannel, ticketChannel, b.indexedTicketLength, ruleset); len(sessions) > 0; requests, sessions, tickets = getNextNBackfillRequests(scope, backfillTicketChannel, ticketChannel, b.indexedTicketLength, ruleset) {
@@ -188,6 +196,8 @@ func (b defaultMatchMaker) BackfillMatches(rootScope *envelope.Scope, ticketProv
 	return results
 }
 
+// runBackfilling handles the backfill process for existing sessions.
+// This method attempts to add new players to existing matches that need more participants.
 func (b defaultMatchMaker) runBackfilling(
 	rootScope *envelope.Scope, tickets []matchmaker.Ticket, requests []models.MatchmakingRequest,
 	sessions []*models.MatchmakingResult, channel models.Channel, results chan matchmaker.BackfillProposal,
@@ -198,11 +208,13 @@ func (b defaultMatchMaker) runBackfilling(
 	defer wg.Done()
 	namespace, matchPool := getNamespaceMatchPool(tickets)
 
+	// Attempt to match new players with existing sessions
 	updatedSessions, satisfiedSessions, satisfiedTickets, err := b.mm.MatchSessions(scope, namespace, matchPool, requests, sessions, channel)
 	if err != nil {
 		scope.Log.Errorf("error backfilling matches: %s", err)
 	}
 
+	// Convert results to backfill proposals
 	for _, result := range updatedSessions {
 		results <- fromMatchResultToBackfillProposal(result, satisfiedTickets, tickets)
 	}
@@ -211,10 +223,13 @@ func (b defaultMatchMaker) runBackfilling(
 	}
 }
 
+// getNextNRequests retrieves the next batch of tickets from the ticket channel.
+// This function processes tickets in chunks to improve performance and memory usage.
 func getNextNRequests(ticketChannel chan matchmaker.Ticket, maxTicketCount int, ruleset models.RuleSet) ([]models.MatchmakingRequest, []matchmaker.Ticket) {
 	var indexedTickets []matchmaker.Ticket
 	var requests []models.MatchmakingRequest
 
+	// Collect up to maxTicketCount tickets from the channel
 	for i := 0; i < maxTicketCount; i++ {
 		ticket, ok := <-ticketChannel
 		if !ok {
@@ -222,11 +237,14 @@ func getNextNRequests(ticketChannel chan matchmaker.Ticket, maxTicketCount int, 
 		}
 		indexedTickets = append(indexedTickets, ticket)
 	}
+	// Convert tickets to matchmaking requests
 	requests = pie.Map(indexedTickets, toMatchRequest(ruleset))
 
 	return requests, indexedTickets
 }
 
+// getNextNBackfillRequests retrieves both backfill tickets and regular tickets for processing.
+// This function runs two goroutines concurrently to collect tickets and backfill sessions.
 func getNextNBackfillRequests(rootScope *envelope.Scope, backfillTicketChannel chan matchmaker.BackfillTicket,
 	ticketChannel chan matchmaker.Ticket, maxTicketCount int, ruleSet models.RuleSet) ([]models.MatchmakingRequest, []*models.MatchmakingResult, []matchmaker.Ticket) {
 
@@ -239,6 +257,7 @@ func getNextNBackfillRequests(rootScope *envelope.Scope, backfillTicketChannel c
 	var sessions []*models.MatchmakingResult
 	wg := sync.WaitGroup{}
 
+	// Collect regular tickets in a goroutine
 	wg.Add(1)
 	go func(wg *sync.WaitGroup) {
 		for i := 0; i < maxTicketCount; i++ {
@@ -248,6 +267,7 @@ func getNextNBackfillRequests(rootScope *envelope.Scope, backfillTicketChannel c
 			}
 
 			request := toMatchRequest(ruleSet)(ticket)
+			// Skip tickets that are only for new sessions
 			if request.IsNewSessionOnly() {
 				continue
 			}
@@ -258,6 +278,7 @@ func getNextNBackfillRequests(rootScope *envelope.Scope, backfillTicketChannel c
 		wg.Done()
 	}(&wg)
 
+	// Collect backfill tickets in a goroutine
 	wg.Add(1)
 	go func(wg *sync.WaitGroup) {
 		for i := 0; i < maxTicketCount; i++ {
@@ -267,6 +288,7 @@ func getNextNBackfillRequests(rootScope *envelope.Scope, backfillTicketChannel c
 			}
 			indexedBackfillTickets = append(indexedBackfillTickets, backfillTicket)
 		}
+		// Convert backfill tickets to matchmaking results
 		sessions = pie.Map(indexedBackfillTickets, fromBackfillTicketsToMatchResult(scope, ruleSet))
 		wg.Done()
 	}(&wg)
@@ -275,17 +297,20 @@ func getNextNBackfillRequests(rootScope *envelope.Scope, backfillTicketChannel c
 	return requests, sessions, indexedTickets
 }
 
+// toMatchRequest converts a matchmaker.Ticket to a models.MatchmakingRequest.
+// This function handles the conversion of ticket data to the internal request format.
 func toMatchRequest(ruleset models.RuleSet) func(ticket matchmaker.Ticket) models.MatchmakingRequest {
 	return func(ticket matchmaker.Ticket) models.MatchmakingRequest {
 		if ticket.TicketAttributes == nil {
 			ticket.TicketAttributes = make(map[string]interface{})
 		}
 
-		// fit player's stat data into v1 ticket attribute format
+		// Fit player's stat data into v1 ticket attribute format
 		memberAttributes := avergaeMatchingRuleAttributes(ticket.Players, ruleset)
 
 		ticket.TicketAttributes[models.AttributeMemberAttr] = memberAttributes
 
+		// Sort regions by latency for optimal matching
 		var sortedLatency []models.Region
 		for region, latency := range ticket.Latencies {
 			sortedLatency = append(sortedLatency, models.Region{Region: region, Latency: int(latency)})
@@ -294,7 +319,7 @@ func toMatchRequest(ruleset models.RuleSet) func(ticket matchmaker.Ticket) model
 			return sortedLatency[i].Latency < sortedLatency[j].Latency
 		})
 
-		// convert latency to int because matchmaker.Ticket is int64
+		// Convert latency to int because matchmaker.Ticket is int64
 		latencyMap := map[string]int{}
 		for k, v := range ticket.Latencies {
 			latencyMap[k] = int(v)
@@ -318,6 +343,8 @@ func toMatchRequest(ruleset models.RuleSet) func(ticket matchmaker.Ticket) model
 	}
 }
 
+// avergaeMatchingRuleAttributes calculates the average of matching rule attributes across all players.
+// This function aggregates player attributes to create party-level attributes for matchmaking.
 func avergaeMatchingRuleAttributes(players []player.PlayerData, ruleset models.RuleSet) map[string]interface{} {
 	memberAttributes := make(map[string]interface{})
 
@@ -328,6 +355,7 @@ func avergaeMatchingRuleAttributes(players []player.PlayerData, ruleset models.R
 				continue
 			}
 			if attr, ok := playerData.Attributes[rule.Attribute]; ok {
+				// Handle different numeric types
 				switch attr.(type) {
 				case float64:
 					totalAttr += attr.(float64)
@@ -349,8 +377,10 @@ func avergaeMatchingRuleAttributes(players []player.PlayerData, ruleset models.R
 	return memberAttributes
 }
 
+// fromMatchResult converts a models.MatchmakingResult to a matchmaker.Match.
+// This function handles the conversion from internal matchmaking result to the external match format.
 func fromMatchResult(result *models.MatchmakingResult, sourceTickets []matchmaker.Ticket, ruleset models.RuleSet) matchmaker.Match {
-	// generate ticket array from teams
+	// Generate ticket array from teams
 	var matchingTickets []matchmaker.Ticket
 	for _, ally := range result.MatchingAllies {
 		for _, party := range ally.MatchingParties {
@@ -361,13 +391,13 @@ func fromMatchResult(result *models.MatchmakingResult, sourceTickets []matchmake
 		}
 	}
 
-	// handle backfill flag
+	// Handle backfill flag based on match fullness
 	backfill := ruleset.AutoBackfill
 	if backfill {
 		backfill = !isMatchFull(matchingTickets, result, ruleset)
 	}
 
-	// fill v1-specific fields back into match attributes
+	// Fill v1-specific fields back into match attributes
 	if result.ServerName != "" {
 		result.PartyAttributes[models.AttributeServerName] = result.ServerName
 	}
@@ -388,8 +418,10 @@ func fromMatchResult(result *models.MatchmakingResult, sourceTickets []matchmake
 	}
 }
 
+// isMatchFull determines if a match has reached its maximum player capacity.
+// This function considers alliance flexing rules when calculating the maximum player count.
 func isMatchFull(tickets []matchmaker.Ticket, result *models.MatchmakingResult, ruleset models.RuleSet) bool {
-	// find the oldest ticket age to figure out if there's any flexing
+	// Find the oldest ticket age to figure out if there's any flexing
 	oldestTicket := pie.SortUsing(tickets, func(t1, t2 matchmaker.Ticket) bool {
 		return t1.CreatedAt.Before(t2.CreatedAt)
 	})[0]
@@ -400,7 +432,7 @@ func isMatchFull(tickets []matchmaker.Ticket, result *models.MatchmakingResult, 
 		maxPlayerCount = currentRule.AllianceRule.MaxNumber * currentRule.AllianceRule.PlayerMaxNumber
 	}
 
-	// check if match is full
+	// Check if match is full
 	var matchPlayerCount int
 	pie.Each(tickets, func(t matchmaker.Ticket) {
 		matchPlayerCount += len(t.Players)
@@ -409,6 +441,8 @@ func isMatchFull(tickets []matchmaker.Ticket, result *models.MatchmakingResult, 
 	return maxPlayerCount <= matchPlayerCount
 }
 
+// toTeams converts matching allies to matchmaker.Team structures.
+// This function creates team structures from the internal matching ally format.
 func toTeams(tickets []matchmaker.Ticket, alliances []models.MatchingAlly) []matchmaker.Team {
 	teams := make([]matchmaker.Team, 0, len(alliances))
 	ticketsMap := make(map[string]int)
@@ -427,7 +461,7 @@ func toTeams(tickets []matchmaker.Ticket, alliances []models.MatchingAlly) []mat
 		for _, party := range parties {
 			userIDs = append(userIDs, pie.Map(party.PartyMembers, partyMemberToUserID)...)
 
-			// get party ID from tickets
+			// Get party ID from tickets
 			var partyID string
 			if party.PartyID == externalPartyID {
 				partyID = externalPartyID
@@ -458,10 +492,14 @@ func toTeams(tickets []matchmaker.Ticket, alliances []models.MatchingAlly) []mat
 	return teams
 }
 
+// partyMemberToUserID converts a models.PartyMember to a player.ID.
+// This is a simple conversion function for type compatibility.
 func partyMemberToUserID(m models.PartyMember) player.ID {
 	return player.ID(m.UserID)
 }
 
+// playerDataToPartyMember converts a player.PlayerData to a models.PartyMember.
+// This function handles the conversion from player data to party member format.
 func playerDataToPartyMember(playerData player.PlayerData) models.PartyMember {
 	partyMember := models.PartyMember{
 		UserID:          string(playerData.PlayerID),
@@ -470,17 +508,21 @@ func playerDataToPartyMember(playerData player.PlayerData) models.PartyMember {
 	return partyMember
 }
 
+// fromBackfillTicketsToMatchResult converts a backfill ticket to a matchmaking result.
+// This function creates a matchmaking result from a backfill ticket for session matching.
 func fromBackfillTicketsToMatchResult(rootScope *envelope.Scope, rules models.RuleSet) func(backfillTicket matchmaker.BackfillTicket) *models.MatchmakingResult {
 	return func(backfillTicket matchmaker.BackfillTicket) *models.MatchmakingResult {
 		scope := rootScope.NewChildScope("defaultmatchfunction.fromBackfillTicketsToMatchResult")
 		defer scope.Finish()
 
+		// Extract team members for metrics
 		var teamMembers []string
 		for _, team := range backfillTicket.PartialMatch.Teams {
 			teamMembers = append(teamMembers, pie.Map(team.UserIDs, player.IDToString)...)
 		}
 		scope.SetAttributes(envelope.TeamMembersTag, teamMembers)
 
+		// Extract region preference
 		var region string
 		if len(backfillTicket.PartialMatch.RegionPreference) > 0 {
 			region = backfillTicket.PartialMatch.RegionPreference[0]
@@ -489,6 +531,8 @@ func fromBackfillTicketsToMatchResult(rootScope *envelope.Scope, rules models.Ru
 		if backfillTicket.PartialMatch.MatchAttributes != nil {
 			partyAttributes = backfillTicket.PartialMatch.MatchAttributes
 		}
+
+		// Extract server name and client version
 		var serverName string
 		if partyAttributes[models.AttributeServerName] != nil {
 			scope.SetAttributes(envelope.ServerNameTag, serverName)
@@ -499,6 +543,7 @@ func fromBackfillTicketsToMatchResult(rootScope *envelope.Scope, rules models.Ru
 			clientVersion = partyAttributes[models.AttributeClientVersion].(string)
 		}
 
+		// Collect player data from all tickets
 		var playerData []player.PlayerData
 
 		for _, ticket := range backfillTicket.PartialMatch.Tickets {
@@ -526,6 +571,8 @@ func fromBackfillTicketsToMatchResult(rootScope *envelope.Scope, rules models.Ru
 	}
 }
 
+// fromTeamToMatchingAllies converts a matchmaker.Team to a models.MatchingAlly.
+// This function creates matching allies from team structures for backfill operations.
 func fromTeamToMatchingAllies(sourceTickets []matchmaker.Ticket) func(team matchmaker.Team) models.MatchingAlly {
 	return func(team matchmaker.Team) models.MatchingAlly {
 		foundParties := teamToMatchingParties(team, sourceTickets)
@@ -538,6 +585,8 @@ func fromTeamToMatchingAllies(sourceTickets []matchmaker.Ticket) func(team match
 	}
 }
 
+// teamToMatchingParties converts a team to matching parties.
+// This function maps team members to their corresponding tickets and creates party structures.
 func teamToMatchingParties(team matchmaker.Team, sourceTickets []matchmaker.Ticket) map[string]models.MatchingParty {
 	foundParties := make(map[string]models.MatchingParty)
 	for _, id := range team.UserIDs {
@@ -547,6 +596,7 @@ func teamToMatchingParties(team matchmaker.Team, sourceTickets []matchmaker.Tick
 				return index >= 0
 			})
 		if ticketIndex < 0 {
+			// Handle external party members
 			externalParty, found := foundParties[externalPartyID]
 			if !found {
 				externalParty = models.MatchingParty{
@@ -569,7 +619,7 @@ func teamToMatchingParties(team matchmaker.Team, sourceTickets []matchmaker.Tick
 		}
 
 		partyID := ticket.TicketID
-		// this from manual backfill
+		// Handle manual backfill party IDs
 		if strings.Contains(partyID, "-") {
 			partyID = externalPartyID
 		}
@@ -585,16 +635,18 @@ func teamToMatchingParties(team matchmaker.Team, sourceTickets []matchmaker.Tick
 	return foundParties
 }
 
+// fromMatchResultToBackfillProposal converts a matchmaking result to a backfill proposal.
+// This function creates a backfill proposal from a successful matchmaking result.
 func fromMatchResultToBackfillProposal(result *models.MatchmakingResult, satisfiedRequests []models.MatchmakingRequest, sourceTickets []matchmaker.Ticket) matchmaker.BackfillProposal {
 	var addedTickets []matchmaker.Ticket
 	for _, ally := range result.MatchingAllies {
 		for _, party := range ally.MatchingParties {
-			// check if party's ticket is in satisfied requests (tickets)
+			// Check if party's ticket is in satisfied requests (tickets)
 			index := pie.FindFirstUsing(satisfiedRequests, func(r models.MatchmakingRequest) bool { return r.PartyID == party.PartyID })
 			if index < 0 {
 				continue
 			}
-			// store the ticket to added tickets
+			// Store the ticket to added tickets
 			index = pie.FindFirstUsing(sourceTickets, func(t matchmaker.Ticket) bool { return t.TicketID == party.PartyID })
 			if index < 0 {
 				continue
@@ -613,6 +665,8 @@ func fromMatchResultToBackfillProposal(result *models.MatchmakingResult, satisfi
 	}
 }
 
+// addToPartiesRegionInMatchQueueMetrics adds metrics for monitoring parties in match queue by region.
+// This function tracks the distribution of parties across different regions for analytics.
 func (b defaultMatchMaker) addToPartiesRegionInMatchQueueMetrics(rootScope *envelope.Scope, requests []models.MatchmakingRequest,
 	sourceTickets []matchmaker.Ticket, channel models.Channel,
 ) {
@@ -641,6 +695,8 @@ func (b defaultMatchMaker) addToPartiesRegionInMatchQueueMetrics(rootScope *enve
 	}
 }
 
+// getNamespaceMatchPool extracts namespace and match pool from a slice of tickets.
+// This function returns the namespace and match pool of the first ticket, or empty strings if no tickets exist.
 func getNamespaceMatchPool(tickets []matchmaker.Ticket) (string, string) {
 	if len(tickets) == 0 {
 		return "", ""
@@ -648,6 +704,8 @@ func getNamespaceMatchPool(tickets []matchmaker.Ticket) (string, string) {
 	return tickets[0].Namespace, tickets[0].MatchPool
 }
 
+// runMatchMaking executes the actual matchmaking process for a batch of requests.
+// This function coordinates the matchmaking operation and sends results through the result channel.
 func (b defaultMatchMaker) runMatchMaking(rootScope *envelope.Scope, requests []models.MatchmakingRequest,
 	resultChan chan matchmaker.Match, wg *sync.WaitGroup, modelChannel models.Channel, ruleSet models.RuleSet,
 	sourceTickets []matchmaker.Ticket,
@@ -658,11 +716,13 @@ func (b defaultMatchMaker) runMatchMaking(rootScope *envelope.Scope, requests []
 
 	namespace, matchPool := getNamespaceMatchPool(sourceTickets)
 
+	// Perform the actual matchmaking
 	matchResults, _, err := b.mm.MatchPlayers(scope, namespace, matchPool, requests, modelChannel)
 	if err != nil {
 		scope.Log.Errorf("error making matches: %s", err)
 	}
 
+	// Convert results and send them through the channel
 	matchedTicketCount := 0
 	for _, result := range matchResults {
 		for _, allies := range result.MatchingAllies {

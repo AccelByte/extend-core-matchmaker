@@ -115,21 +115,27 @@ func getTicketMaxLatency(ticket *models.MatchmakingRequest, channel *models.Chan
 	return latency
 }
 
+// sortDESC sorts matchmaking requests by player count in descending order.
+// This function prioritizes larger parties for matchmaking.
 func sortDESC(matchmakingRequests []models.MatchmakingRequest) {
 	sort.Slice(matchmakingRequests, func(i, j int) bool {
 		return matchmakingRequests[i].CountPlayer() > matchmakingRequests[j].CountPlayer()
 	})
 }
 
+// isContainBlockedPlayers checks if any players in the given tickets are blocked.
+// This function collects all member IDs and blocked IDs, then checks for conflicts.
 func isContainBlockedPlayers(tickets []models.MatchmakingRequest, ticket *models.MatchmakingRequest) bool {
 	memberIDs := make([]string, 0)
 	blockedIDs := make(map[string]struct{}, 0)
 
+	// Collect member IDs and blocked IDs from the current ticket
 	memberIDs = append(memberIDs, ticket.GetMemberUserIDs()...)
 	for _, blockedID := range ticket.GetBlockedPlayerUserIDs() {
 		blockedIDs[blockedID] = struct{}{}
 	}
 
+	// Collect member IDs and blocked IDs from all other tickets
 	for _, ticket := range tickets {
 		memberIDs = append(memberIDs, ticket.GetMemberUserIDs()...)
 		for _, blockedID := range ticket.GetBlockedPlayerUserIDs() {
@@ -137,6 +143,7 @@ func isContainBlockedPlayers(tickets []models.MatchmakingRequest, ticket *models
 		}
 	}
 
+	// Check if any member ID is in the blocked IDs list
 	for _, userID := range memberIDs {
 		if _, exist := blockedIDs[userID]; exist {
 			return true
@@ -145,6 +152,8 @@ func isContainBlockedPlayers(tickets []models.MatchmakingRequest, ticket *models
 	return false
 }
 
+// filterRegionByStep filters regions based on the ticket's expansion step and latency requirements.
+// This function determines which regions are acceptable for matchmaking based on latency constraints.
 func filterRegionByStep(ticket *models.MatchmakingRequest, channel *models.Channel) []models.Region {
 	if len(ticket.SortedLatency) == 0 {
 		return nil
@@ -161,6 +170,8 @@ func filterRegionByStep(ticket *models.MatchmakingRequest, channel *models.Chann
 	})
 }
 
+// skipFilterCandidateRegion determines if region filtering should be skipped based on ticket age.
+// This function implements a timeout mechanism to disable bidirectional latency filtering after a certain duration.
 func skipFilterCandidateRegion(ticket *models.MatchmakingRequest, channel *models.Channel) bool {
 	if channel.Ruleset.DisableBidirectionalLatencyAfterMs <= 0 {
 		return false
@@ -170,6 +181,8 @@ func skipFilterCandidateRegion(ticket *models.MatchmakingRequest, channel *model
 	return disableDuration < ticketAge
 }
 
+// RemoveEmptyMatchingParties removes empty matching parties from the allies list.
+// This function cleans up the allies list by removing parties with no members.
 func RemoveEmptyMatchingParties(allies []models.MatchingAlly) []models.MatchingAlly {
 	for i := 0; i < len(allies); i++ {
 		ally := allies[i]
@@ -182,6 +195,8 @@ func RemoveEmptyMatchingParties(allies []models.MatchingAlly) []models.MatchingA
 	return allies
 }
 
+// DetermineAllianceComposition extracts alliance composition from a ruleset.
+// This function creates an AllianceComposition structure from the alliance rule configuration.
 func DetermineAllianceComposition(ruleSet models.RuleSet) models.AllianceComposition {
 	minTeam := ruleSet.AllianceRule.MinNumber
 	maxTeam := ruleSet.AllianceRule.MaxNumber
