@@ -355,6 +355,56 @@ The system validates tickets before processing:
 - **Error reporting**: Detailed error messages for debugging
 - **Fallback behavior**: Use default values when possible
 
+## Feature Limitations
+
+### Features Not Available in Extend Core Matchmaker
+
+The following advanced features are **not available** in the Extend Core Matchmaker and are only available in the internal AccelByte matchmaking service:
+
+#### **1. Rebalance Operations**
+- **Session rebalancing**: Moving players between teams during active matches
+- **Dynamic team adjustments**: Real-time team size optimization
+- **Mid-match player redistribution**: Reassigning players to balance teams
+
+#### **2. Role-Based Matching**
+- **Role assignment**: Automatic role distribution based on player preferences
+- **Role validation**: Ensuring proper role composition in teams
+- **Role-specific matching**: Matching players based on their preferred roles
+- **Role balancing**: Ensuring each team has required roles
+
+#### **3. Current Platform Matching**
+- **Platform-specific matching**: Matching players based on their current gaming platform
+- **Cross-platform restrictions**: Limiting matches to specific platforms
+- **Platform preference handling**: Managing platform-specific player preferences
+
+#### **4. Sub-Game Mode Support**
+- **Mode-specific rules**: Different matching rules for different game modes
+- **Mode-based pools**: Separate match pools for different game modes
+- **Mode switching**: Dynamic mode-based matchmaking adjustments
+
+### Why These Features Are Limited
+
+The Extend Core Matchmaker is designed as a **lightweight, extensible foundation** that provides:
+
+- **Core matchmaking algorithms**: Essential matching logic and data structures
+- **Basic configuration system**: JSON-based rule configuration
+- **Fundamental operations**: New match creation and basic backfill
+- **Performance optimization**: Efficient search and processing algorithms
+
+Advanced features like rebalancing, role-based matching, and comprehensive metrics require:
+
+- **Complex state management**: Tracking ongoing matches and player states
+- **Real-time coordination**: Synchronizing with active game sessions
+- **Advanced analytics infrastructure**: Collecting and processing detailed metrics
+- **Platform-specific integrations**: Deep integration with gaming platforms
+
+### Migration Path
+
+If you need these advanced features, consider:
+
+1. **Using the matchmaking service match function**: Leverage the full AccelByte matchmaking service
+2. **Custom implementation**: Build these features on top of the extend core
+
 ## Troubleshooting
 
 ### Common Issues
