@@ -56,13 +56,6 @@ func MakeTraceID(identifiers ...string) string {
 	return fmt.Sprintf(tID + strInt)
 }
 
-// GenerateUUID generates uuid without hyphens
-func GenerateUUID() string {
-	id, _ := uuid.NewRandom()
-
-	return strings.ReplaceAll(id.String(), "-", "")
-}
-
 // LogJSONFormatter is printing the data in log
 func LogJSONFormatter(data interface{}) string {
 	response, err := json.Marshal(data)

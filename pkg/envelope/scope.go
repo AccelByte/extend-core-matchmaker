@@ -9,12 +9,11 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/AccelByte/extend-core-matchmaker/pkg/utils"
 	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	oteltrace "go.opentelemetry.io/otel/trace"
-
-	"github.com/AccelByte/extend-core-matchmaker/pkg/common"
 )
 
 const (
@@ -32,7 +31,7 @@ func ChildScopeFromRemoteScope(ctx context.Context, name string) *Scope {
 	tracerCtx, span := tracer.Start(ctx, name)
 	traceID := span.SpanContext().TraceID().String()
 	if traceID == "" || len(traceID) != 32 {
-		traceID = common.GenerateUUID()
+		traceID = utils.GenerateUUID()
 	}
 
 	return &Scope{
@@ -48,7 +47,7 @@ func NewRootScope(rootCtx context.Context, name string, abTraceID string) *Scope
 	ctx, span := tracer.Start(rootCtx, name)
 
 	if abTraceID == "" || len(abTraceID) != 32 {
-		abTraceID = common.GenerateUUID()
+		abTraceID = utils.GenerateUUID()
 	}
 
 	scope := &Scope{

@@ -15,10 +15,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AccelByte/extend-core-matchmaker/pkg/common"
 	"github.com/AccelByte/extend-core-matchmaker/pkg/config"
 	"github.com/AccelByte/extend-core-matchmaker/pkg/envelope"
 	"github.com/AccelByte/extend-core-matchmaker/pkg/models"
+	"github.com/AccelByte/extend-core-matchmaker/pkg/utils"
 
 	"github.com/AccelByte/extend-core-matchmaker/pkg/matchmaker"
 	player "github.com/AccelByte/extend-core-matchmaker/pkg/playerdata"
@@ -480,7 +480,7 @@ func toTeams(tickets []matchmaker.Ticket, alliances []models.MatchingAlly) []mat
 		}
 		teamID := alliance.TeamID
 		if teamID == "" {
-			teamID = common.GenerateUUID()
+			teamID = utils.GenerateUUID()
 		}
 		teams = append(teams, matchmaker.Team{
 			TeamID:  teamID,
