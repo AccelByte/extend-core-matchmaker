@@ -206,7 +206,7 @@ ticketLoop:
 			}
 		}
 
-		// filter by session region
+		// Filter by session region
 		if session.Region != "" {
 			filteredRegions := filterRegionByStep(ticket, channel)
 			regionIdx := slices.IndexFunc(filteredRegions, func(item models.Region) bool { return item.Region == session.Region })
@@ -215,18 +215,21 @@ ticketLoop:
 			}
 		}
 
+		// Check distance-based matching
 		isMatch, score := matchByDistance(ticket, originalRuleSet, distances)
 		if !isMatch {
 			continue
 		}
 		totalScore += score
 
+		// Check cross-play compatibility
 		if ok, fn := matchByAnyCrossPlay(ticket, anyCrossPlay, mm.isMatchAnyCommon); !ok {
 			continue
 		} else if fn != nil {
 			finalizeFunctions = append(finalizeFunctions, fn)
 		}
 
+		// Check match option compatibility
 		if ok, fns := matchByMatchOption(ticket, options, mm.isMatchAnyCommon); !ok {
 			continue
 		} else {
@@ -235,41 +238,48 @@ ticketLoop:
 			}
 		}
 
+		// Check party attribute compatibility
 		if !matchByPartyAttribute(ticket, partyAttributes, activeRuleSet.MatchOptionsReferredForBackfill) {
 			continue
 		}
 
+		// Check blocked players
 		if ok, fn := matchByBlockedPlayers(ticket, userIDSet, blockSet, channel.Ruleset.BlockedPlayerOption); !ok {
 			continue
 		} else if fn != nil {
 			finalizeFunctions = append(finalizeFunctions, fn)
 		}
 
+		// Check server name compatibility
 		if session.ServerName != "" {
 			if session.ServerName != ticket.PartyAttributes[models.AttributeServerName] {
 				continue
 			}
 		}
 
+		// Check client version compatibility
 		if session.ClientVersion != "" {
 			if session.ClientVersion != ticket.PartyAttributes[models.AttributeClientVersion] {
 				continue
 			}
 		}
 
+		// Add ticket to results if all criteria are met
 		matchTickets = append(matchTickets, matchTicket{
 			ticket: *ticket,
 			score:  totalScore,
 		})
 
-		// call finalize function for matched ticket
+		// Call finalize function for matched ticket
 		for _, fn := range finalizeFunctions {
 			fn()
 		}
 	}
 
+	// Sort tickets based on priority, score, and latency
 	sortMatchTickets(matchTickets, session.Region)
 
+	// Convert matchTickets to models.MatchmakingRequest slice
 	results := make([]models.MatchmakingRequest, len(matchTickets))
 	for i, v := range matchTickets {
 		results[i] = v.ticket
@@ -278,36 +288,42 @@ ticketLoop:
 	return results
 }
 
+// sortMatchTickets sorts match tickets based on multiple criteria.
+// This function prioritizes tickets by priority (descending), score (ascending), latency (ascending), and creation time (ascending).
 func sortMatchTickets(matchTickets []matchTicket, sessionRegion string) {
 	sort.Slice(matchTickets, func(i, j int) bool {
-		// consider priority first (DESC)
+		// Consider priority first (DESC)
 		if matchTickets[i].ticket.Priority != matchTickets[j].ticket.Priority {
 			return matchTickets[i].ticket.Priority > matchTickets[j].ticket.Priority
 		}
-		// then, score (ASC)
+		// Then, score (ASC)
 		if matchTickets[i].score != matchTickets[j].score {
 			return matchTickets[i].score < matchTickets[j].score
 		}
-		// then, latency for matchSession (ASC)
+		// Then, latency for matchSession (ASC)
 		if sessionRegion != "" {
 			iLatency := matchTickets[i].ticket.LatencyMap[sessionRegion]
 			jLatency := matchTickets[j].ticket.LatencyMap[sessionRegion]
 			return iLatency < jLatency
 		}
-		// then, createdAt (ASC)
+		// Then, createdAt (ASC)
 		return matchTickets[i].ticket.CreatedAt < matchTickets[j].ticket.CreatedAt
 	})
 }
 
+// distance represents a distance-based matching criterion.
+// This structure contains the attribute name, value range, and weight for distance-based matching.
 type distance struct {
-	attribute         string
-	value             float64
-	min               float64
-	max               float64
-	attributeMaxValue float64
-	weight            *float64
+	attribute         string   // The attribute name to match on
+	value             float64  // The pivot value
+	min               float64  // Minimum acceptable value
+	max               float64  // Maximum acceptable value
+	attributeMaxValue float64  // Maximum value for normalization
+	weight            *float64 // Weight for scoring
 }
 
+// getWeight returns the weight value for this distance criterion.
+// If no weight is specified, returns the default weight value.
 func (d distance) getWeight() float64 {
 	if d.weight == nil {
 		return models.DefaultWeightValue
@@ -315,6 +331,8 @@ func (d distance) getWeight() float64 {
 	return *d.weight
 }
 
+// getFilterByDistance extracts distance-based matching criteria from party attributes.
+// This function creates distance structures for each matching rule that uses distance criteria.
 func getFilterByDistance(activeRuleSet *models.RuleSet, partyAttributes map[string]interface{}) []distance {
 	memberAttributes, ok := partyAttributes[memberAttributesKey].(map[string]interface{})
 	if !ok {
@@ -343,12 +361,14 @@ func getFilterByDistance(activeRuleSet *models.RuleSet, partyAttributes map[stri
 	return distances
 }
 
-// matchByDistance with score, the smaller the better
+// matchByDistance checks if a ticket matches distance-based criteria and returns a score.
+// The smaller the score, the better the match. This function considers rule flexing for aging tickets.
 func matchByDistance(ticket *models.MatchmakingRequest, originalRuleSet *models.RuleSet, distances []distance) (isMatch bool, score float64) {
 	if len(distances) == 0 {
 		return true, 0.0
 	}
 
+	// Apply rule flexing for the candidate ticket based on its age
 	candidateTimeStampRequest := time.Unix(ticket.CreatedAt, 0)
 	candidateRuleSet, _ := applyRuleFlexing(*originalRuleSet, candidateTimeStampRequest)
 	candidateDistances := getFilterByDistance(&candidateRuleSet, ticket.PartyAttributes)
@@ -363,6 +383,7 @@ func matchByDistance(ticket *models.MatchmakingRequest, originalRuleSet *models.
 			return false, 0.0
 		}
 
+		// Find corresponding candidate distance for bidirectional checking
 		candidateDistanceIndex := -1
 		for i := range candidateDistances {
 			if candidateDistances[i].attribute == distance.attribute {
@@ -371,12 +392,14 @@ func matchByDistance(ticket *models.MatchmakingRequest, originalRuleSet *models.
 			}
 		}
 
+		// Check if value is within acceptable range
 		if value < distance.min {
 			return false, 0.0
 		}
 		if value > distance.max {
 			return false, 0.0
 		}
+		// Bidirectional check if candidate distance exists
 		if candidateDistanceIndex >= 0 {
 			if distance.value < candidateDistances[candidateDistanceIndex].min {
 				return false, 0.0
@@ -385,6 +408,7 @@ func matchByDistance(ticket *models.MatchmakingRequest, originalRuleSet *models.
 				return false, 0.0
 			}
 		}
+		// Calculate score based on distance difference
 		if distance.attributeMaxValue > 0 {
 			score += (math.Abs(value-distance.value) / distance.attributeMaxValue) * distance.getWeight()
 		} else {
@@ -394,12 +418,16 @@ func matchByDistance(ticket *models.MatchmakingRequest, originalRuleSet *models.
 	return true, score
 }
 
+// option represents a match option criterion.
+// This structure contains the option name, type, and values for option-based matching.
 type option struct {
-	name   string
-	types  string
-	values []string
+	name   string   // The option name
+	types  string   // The option type (Any, All, Unique, etc.)
+	values []string // The acceptable values for this option
 }
 
+// getFilterByMatchOption extracts match option criteria from party attributes.
+// This function creates option structures for each match option in the ruleset.
 func getFilterByMatchOption(activeRuleSet *models.RuleSet, partyAttributes map[string]interface{}) []option {
 	options := make([]option, 0)
 	for _, v := range activeRuleSet.MatchOptions.Options {
@@ -410,6 +438,7 @@ func getFilterByMatchOption(activeRuleSet *models.RuleSet, partyAttributes map[s
 		if !ok {
 			continue
 		}
+		// Handle both single values and arrays
 		multiVal, ok := optVal.([]interface{})
 		if !ok {
 			multiVal = append(multiVal, optVal)
@@ -431,6 +460,8 @@ func getFilterByMatchOption(activeRuleSet *models.RuleSet, partyAttributes map[s
 	return options
 }
 
+// matchByMatchOption checks if a ticket matches option-based criteria.
+// This function handles different option types (Any, All, Unique) and returns finalize functions for updates.
 func matchByMatchOption(ticket *models.MatchmakingRequest, options []option, flagAnyMatchOptionAllCommon bool) (ok bool, fns []func()) {
 	if len(options) == 0 {
 		return true, fns
@@ -440,6 +471,7 @@ func matchByMatchOption(ticket *models.MatchmakingRequest, options []option, fla
 		if !ok {
 			return false, fns
 		}
+		// Handle both single values and arrays
 		multiVal, ok := optVal.([]interface{})
 		if !ok {
 			multiVal = append(multiVal, optVal)
@@ -456,6 +488,7 @@ func matchByMatchOption(ticket *models.MatchmakingRequest, options []option, fla
 		case models.MatchOptionTypeAny:
 			var exist bool
 			if flagAnyMatchOptionAllCommon {
+				// Find common values between pivot and candidate
 				commonValueSet := make(map[string]struct{})
 				for _, v := range option.values {
 					if _, ok := mapVal[v]; ok {
@@ -470,11 +503,12 @@ func matchByMatchOption(ticket *models.MatchmakingRequest, options []option, fla
 					}
 					n := i
 					fns = append(fns, func() {
-						// update option with common value
+						// Update option with common value
 						options[n].values = commonValue
 					})
 				}
 			} else {
+				// Check if any value matches
 				for _, v := range option.values {
 					if _, ok := mapVal[v]; ok {
 						exist = true
@@ -487,6 +521,7 @@ func matchByMatchOption(ticket *models.MatchmakingRequest, options []option, fla
 				return false, fns
 			}
 		case models.MatchOptionTypeAll:
+			// Check if all values are present
 			var notExist bool
 			for _, v := range option.values {
 				if _, ok := mapVal[v]; !ok {
@@ -498,6 +533,7 @@ func matchByMatchOption(ticket *models.MatchmakingRequest, options []option, fla
 				return false, fns
 			}
 		case models.MatchOptionTypeUnique:
+			// Check that no values are common (all must be unique)
 			var exist bool
 			for _, v := range option.values {
 				if _, ok := mapVal[v]; ok {
@@ -513,11 +549,15 @@ func matchByMatchOption(ticket *models.MatchmakingRequest, options []option, fla
 	return true, fns
 }
 
+// crossPlayAttributes represents cross-play matching criteria.
+// This structure contains the platforms that a party wants to play with and their current platform.
 type crossPlayAttributes struct {
-	wantPlatforms    map[string]struct{}
-	currentPlatforms map[string]struct{}
+	wantPlatforms    map[string]struct{} // Platforms the party wants to play with
+	currentPlatforms map[string]struct{} // Current platform of the party
 }
 
+// getFilterByCrossPlay extracts cross-play matching criteria from party attributes.
+// This function checks if cross-platform matching is enabled and extracts platform preferences.
 func getFilterByCrossPlay(activeRuleSet *models.RuleSet, partyAttributes map[string]interface{}) *crossPlayAttributes {
 
 	anyCrossPlatform := false
@@ -535,7 +575,7 @@ func getFilterByCrossPlay(activeRuleSet *models.RuleSet, partyAttributes map[str
 		wantPlatforms := multiValueMapString(partyAttributes, models.AttributeCrossPlatform)
 		currentPlatforms := multiValueMapString(partyAttributes, models.AttributeCurrentPlatform)
 		if len(currentPlatforms) == 0 {
-			// this empty when CrossPlatformNoCurrentPlatform=true
+			// This empty when CrossPlatformNoCurrentPlatform=true
 			return nil
 		}
 
@@ -544,6 +584,8 @@ func getFilterByCrossPlay(activeRuleSet *models.RuleSet, partyAttributes map[str
 	return nil
 }
 
+// matchByAnyCrossPlay checks if a ticket matches cross-play criteria.
+// This function ensures bidirectional compatibility between platforms.
 func matchByAnyCrossPlay(ticket *models.MatchmakingRequest, anyCrossPlay *crossPlayAttributes, flagAnyMatchOptionAllCommon bool) (ok bool, finalizeFn func()) {
 	if anyCrossPlay == nil {
 		return true, finalizeFn
@@ -556,7 +598,7 @@ func matchByAnyCrossPlay(ticket *models.MatchmakingRequest, anyCrossPlay *crossP
 		return false, finalizeFn
 	}
 
-	// should satisfy both directions
+	// Should satisfy both directions
 	for platform := range anyCrossPlay.currentPlatforms {
 		if _, ok := wantPlatforms[platform]; !ok {
 			return false, finalizeFn
@@ -576,14 +618,14 @@ func matchByAnyCrossPlay(ticket *models.MatchmakingRequest, anyCrossPlay *crossP
 			}
 		}
 
-		// should not happen, just in case
+		// Should not happen, just in case
 		if len(differentPlatforms) == len(anyCrossPlay.wantPlatforms) {
 			return false, finalizeFn
 		}
 
-		// called when all other conditions are pass
+		// Called when all other conditions are pass
 		finalizeFn = func() {
-			// keep only common values
+			// Keep only common values
 			for _, platform := range differentPlatforms {
 				delete(anyCrossPlay.wantPlatforms, platform)
 			}
@@ -597,11 +639,14 @@ func matchByAnyCrossPlay(ticket *models.MatchmakingRequest, anyCrossPlay *crossP
 	return true, finalizeFn
 }
 
+// multiValueMapString converts a party attribute to a set of strings.
+// This function handles both single values and arrays, converting them to a map for efficient lookup.
 func multiValueMapString(partyAttributes map[string]interface{}, name string) map[string]struct{} {
 	optVal, ok := partyAttributes[name]
 	if !ok {
 		return nil
 	}
+	// Handle both single values and arrays
 	multiVal, ok := optVal.([]interface{})
 	if !ok {
 		multiVal = append(multiVal, optVal)
@@ -618,11 +663,15 @@ func multiValueMapString(partyAttributes map[string]interface{}, name string) ma
 	return mapVal
 }
 
+// partyAttribute represents a party attribute matching criterion.
+// This structure contains the attribute key and value for party attribute matching.
 type partyAttribute struct {
-	key   string
-	value interface{}
+	key   string      // The attribute key
+	value interface{} // The expected value
 }
 
+// getFilterByPartyAttribute extracts party attribute matching criteria.
+// This function filters out match options and special attributes, keeping only relevant party attributes.
 func getFilterByPartyAttribute(activeRuleSet *models.RuleSet, partyAttributes map[string]interface{}) []partyAttribute {
 	result := make([]partyAttribute, 0)
 	optionsMap := make(map[string]struct{})
@@ -630,12 +679,12 @@ func getFilterByPartyAttribute(activeRuleSet *models.RuleSet, partyAttributes ma
 		optionsMap[option.Name] = struct{}{}
 	}
 	for key, value := range partyAttributes {
-		// ignore match options
+		// Ignore match options
 		if _, ok := optionsMap[key]; ok {
 			continue
 		}
 		switch key {
-		// ignore these keys
+		// Ignore these keys
 		case models.AttributeMatchAttempt:
 		case models.AttributeLatencies:
 		case models.AttributeMemberAttr:
@@ -644,7 +693,7 @@ func getFilterByPartyAttribute(activeRuleSet *models.RuleSet, partyAttributes ma
 		case models.AttributeNewSessionOnly:
 		case models.ROLE:
 		case models.AttributeCrossPlatform:
-			// ignore if no matchoption in ruleset
+			// Ignore if no matchoption in ruleset
 			if activeRuleSet.MatchOptions.Options != nil {
 				result = append(result, partyAttribute{
 					key:   key,
@@ -661,17 +710,19 @@ func getFilterByPartyAttribute(activeRuleSet *models.RuleSet, partyAttributes ma
 	return result
 }
 
+// matchByPartyAttribute checks if a ticket matches party attribute criteria.
+// This function handles different types of party attributes including blocked players, server name, and client version.
 func matchByPartyAttribute(ticket *models.MatchmakingRequest, partyAttributes []partyAttribute, matchOptionsReferredForBackfill bool) bool {
 	if len(partyAttributes) == 0 {
 		return true
 	}
 	for _, v := range partyAttributes {
 		switch v.key {
-		// handle blocked players
+		// Handle blocked players
 		case models.AttributeBlocked:
-			// handled on different function
+			// Handled on different function
 
-		// handle server name and client version
+		// Handle server name and client version
 		case models.AttributeServerName, models.AttributeClientVersion:
 			if v.value == nil || v.value == "" {
 				if ticket.PartyAttributes[v.key] == nil || ticket.PartyAttributes[v.key] == "" {
@@ -684,7 +735,7 @@ func matchByPartyAttribute(ticket *models.MatchmakingRequest, partyAttributes []
 
 		default:
 			if !matchOptionsReferredForBackfill {
-				// handle other attributes as "must match this attribute"
+				// Handle other attributes as "must match this attribute"
 				if v.value != "" {
 					if !reflect.DeepEqual(ticket.PartyAttributes[v.key], v.value) {
 						return false
@@ -696,6 +747,8 @@ func matchByPartyAttribute(ticket *models.MatchmakingRequest, partyAttributes []
 	return true
 }
 
+// matchByBlockedPlayers checks if a ticket can be matched based on blocked player criteria.
+// This function handles different blocked player options and returns finalize functions for updating blocked player sets.
 func matchByBlockedPlayers(ticket *models.MatchmakingRequest, userIDSet, blockSet map[string]struct{}, blockedPlayerOption models.BlockedPlayerOption) (ok bool, finalizeFn func()) {
 	if blockedPlayerOption == models.BlockedPlayerCanMatchOnDifferentTeam ||
 		blockedPlayerOption == models.BlockedPlayerCanMatch {
@@ -703,9 +756,8 @@ func matchByBlockedPlayers(ticket *models.MatchmakingRequest, userIDSet, blockSe
 	} else {
 		blocked := false
 		forBlockedUserID := models.RangeBlockedPlayerUserIDs(ticket.PartyAttributes)
-		// for userID := range models.RangeBlockedPlayerUserIDs(ticket.PartyAttributes)
+		// Check if previous matched tickets already contains blocked player
 		forBlockedUserID(func(userID string) bool {
-			// check if previous matched tickets already contains blocked player
 			if _, ok = userIDSet[userID]; ok {
 				blocked = true
 				return false
@@ -717,16 +769,16 @@ func matchByBlockedPlayers(ticket *models.MatchmakingRequest, userIDSet, blockSe
 			return false, finalizeFn
 		}
 
-		// check if the new ticket's member contains blocked players
+		// Check if the new ticket's member contains blocked players
 		for _, member := range ticket.PartyMembers {
 			if _, ok = blockSet[member.UserID]; ok {
 				return false, finalizeFn
 			}
 		}
 
-		// called when all others condition are pass
+		// Called when all others condition are pass
 		finalizeFn = func() {
-			// update block data
+			// Update block data
 			forBlockedUserID(func(userID string) bool {
 				blockSet[userID] = struct{}{}
 				return true
@@ -740,6 +792,8 @@ func matchByBlockedPlayers(ticket *models.MatchmakingRequest, userIDSet, blockSe
 	return true, finalizeFn
 }
 
+// matchByRegionLatencyNormalize checks region latency with normalized scoring.
+// This function normalizes the latency score by dividing by the maximum allowed latency.
 func matchByRegionLatencyNormalize(ticket *models.MatchmakingRequest, pivotRegion *models.Region, channel *models.Channel, skipRegionFilter bool) (bool, float64) {
 	match, score := matchByRegionLatency(ticket, pivotRegion, channel, skipRegionFilter)
 	var maxLatency int = 0
@@ -752,6 +806,8 @@ func matchByRegionLatencyNormalize(ticket *models.MatchmakingRequest, pivotRegio
 	return match, score / float64(maxLatency)
 }
 
+// matchByRegionLatency checks if a ticket matches region latency criteria.
+// This function calculates a score based on the difference between the region's latency and the best available latency.
 func matchByRegionLatency(ticket *models.MatchmakingRequest, pivotRegion *models.Region, channel *models.Channel, skipRegionFilter bool) (bool, float64) {
 	if pivotRegion == nil {
 		return true, 0
@@ -767,9 +823,10 @@ func matchByRegionLatency(ticket *models.MatchmakingRequest, pivotRegion *models
 		return true, 0
 	}
 
+	// Find the pivot region in the filtered regions
 	for i := range filteredRegion {
 		if filteredRegion[i].Region == pivotRegion.Region {
-			// score = abs( candidate region latency - candidate best latency )
+			// Score = abs(candidate region latency - candidate best latency)
 			return true, float64(filteredRegion[i].Latency - filteredRegion[0].Latency)
 		}
 	}
@@ -777,11 +834,15 @@ func matchByRegionLatency(ticket *models.MatchmakingRequest, pivotRegion *models
 	return false, 0
 }
 
+// additionalCriteria represents additional matching criteria.
+// This structure contains the criteria name and value for additional matching.
 type additionalCriteria struct {
-	name  string
-	value interface{}
+	name  string      // The criteria name
+	value interface{} // The expected value
 }
 
+// getFilterByAdditionalCriteria extracts additional criteria from a pivot ticket.
+// This function creates additional criteria structures from the pivot's additional criteria map.
 func getFilterByAdditionalCriteria(pivot *models.MatchmakingRequest) []additionalCriteria {
 	additionalCriterias := make([]additionalCriteria, 0)
 	for k, v := range pivot.AdditionalCriterias {
@@ -793,6 +854,8 @@ func getFilterByAdditionalCriteria(pivot *models.MatchmakingRequest) []additiona
 	return additionalCriterias
 }
 
+// matchByAdditionalCriteria checks if a ticket matches additional criteria.
+// This function ensures that all additional criteria values match exactly.
 func matchByAdditionalCriteria(ticket *models.MatchmakingRequest, additionalCriterias []additionalCriteria) bool {
 	for _, v := range additionalCriterias {
 		value, ok := ticket.AdditionalCriterias[v.name]
